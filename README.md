@@ -155,6 +155,12 @@ Artifacts는 삭제하고 개인 보관본만 남긴다. 키와 암호를 아는
 같이 바꿔야 한다.** JDK가 설치된 환경이라면 `android\make-assetlinks.ps1`로 로컬에서 키와
 이 파일을 만들 수도 있다.
 
+안드로이드는 이 파일을 **도메인 루트에서만** 찾는다. 즉
+`https://forestgps.github.io/.well-known/assetlinks.json` 이어야 하고, 이 저장소의 하위 경로에
+있는 사본은 참고용이다. 실제로 서비스되는 파일은 별도 저장소
+[`forestgps/forestgps.github.io`](https://github.com/forestgps/forestgps.github.io)에 있다.
+지문을 바꿀 때는 두 곳을 함께 고쳐야 한다.
+
 ### 어떤 수정에 APK를 다시 만들어야 하나
 
 화면 내용, 지도, 메모, 임무 같은 웹 부분을 고치는 것은 APK와 무관하다. 웹 파일을 고쳐 push하면
