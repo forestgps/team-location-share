@@ -26,6 +26,13 @@
   // 파일 선택 중 앱이 다시 시작되면 되살릴 메모 초안(세션 한정)
   var MEMO_DRAFT_KEY = "rtloc.memoDraft.v1";
 
+  // 브로커 보관함(retained 메시지)에 올린 첨부 목록. 켤 때마다 다시 올리지 않기 위함이다.
+  var VAULT_KEY = "rtloc.vault.v1";
+  // 보관함에 올릴 최대 크기. 이보다 크면 접속 중인 대원끼리만 주고받는다.
+  var VAULT_MAX_BYTES = 6 * 1024 * 1024;
+  // 보관함에서 첫 조각을 이 시간 안에 못 받으면 접속 중인 대원에게 요청한다.
+  var VAULT_WAIT = 5000;
+
   // 대원 구분용 색상 팔레트와 중복 없는 배분 규칙은 palette.js 에 있다.
   var PALETTE = RtlocPalette.PALETTE;
 
@@ -71,6 +78,9 @@
     mediaSending: Object.create(null), // 내가 보내는 중인 첨부
     chunkSeen: Object.create(null), // 다른 대원이 보내는 중인 첨부 (mediaId -> 시각)
     mediaOwnerMemo: Object.create(null), // mediaId -> memoId
+    vaultSubs: Object.create(null), // 보관함을 구독 중인 첨부 (mediaId -> true)
+    vaultStashing: Object.create(null), // 보관함에 올리는 중인 첨부
+    mediaFromVault: Object.create(null), // 보관함에서 받은 첨부 (재업로드 방지)
     assembler: null, // 수신 조각 조립기
     unreadCount: 0 // 읽지 않은 메시지 수
   };
@@ -837,8 +847,10 @@
         closeMemoEditor();
         addMemoMarker(memo);
         updateMemoCount();
-        // 좌표와 본문은 팀에 공유한다(첨부는 제외).
+        // 좌표와 본문은 팀에 공유한다(첨부는 목록만).
         publish({ type: "memo", action: "add", id: state.clientId, memo: RtlocMemo.toWire(memo) });
+        // 첨부는 브로커 보관함에 올려 둔다. 내가 접속을 끊어도 팀원이 받을 수 있다.
+        stashMemoMedia(memo, true);
         toast("메모를 저장했습니다. 팀원에게 위치와 내용을 공유했습니다.");
       })
       .catch(function (err) {
@@ -1014,7 +1026,7 @@
 
         var progress = document.createElement("div");
         progress.className = "attachment-progress";
-        progress.textContent = "전송 요청 중… 파일을 가진 대원이 접속 중이면 곧 도착합니다.";
+        progress.textContent = "첨부를 가져오는 중… 보관함을 먼저 확인합니다.";
 
         var retry = document.createElement("button");
         retry.type = "button";
@@ -1065,7 +1077,7 @@
   }
 
   // ---------- 메모: 첨부 전송 ----------
-  /** 아직 받지 못한 첨부를 작성자에게 요청한다. */
+  /** 아직 받지 못한 첨부를 가져온다. */
   function requestMissingMedia(memo) {
     (memo.media || []).forEach(function (item) {
       if (item.blob || !item.mediaId) return;
@@ -1073,10 +1085,23 @@
     });
   }
 
+  /**
+   * 첨부 가져오기.
+   *
+   * 먼저 브로커 보관함을 본다. 올린 대원이 접속 중이 아니어도 여기서 받을 수 있다.
+   * 보관함에 없으면(용량이 커서 안 올라간 경우 등) 접속 중인 대원에게 요청한다.
+   */
   function requestMedia(memo, item) {
     if (state.mediaRequested[item.mediaId]) return;
     state.mediaRequested[item.mediaId] = true;
+    state.mediaOwnerMemo[item.mediaId] = memo.id;
 
+    fetchFromVault(memo, item);
+  }
+
+  /** 접속 중인 대원에게 직접 요청한다(보관함에 없을 때의 대비책). */
+  function requestFromTeam(memo, item) {
+    updateMediaProgress(item.mediaId, "접속 중인 대원에게 요청했습니다…");
     publish({
       type: "media",
       action: "req",
@@ -1085,6 +1110,188 @@
       mediaId: item.mediaId,
       ownerId: memo.authorId
     });
+  }
+
+  // ---------- 첨부 보관함 (브로커 retained 메시지) ----------
+  //
+  // 서버가 없어도 파일이 남아 있게 하는 방법.
+  // 조각마다 고유한 토픽에 retain 표시를 달아 발행하면, 브로커가 마지막 값을 들고 있다가
+  // 나중에 그 토픽을 구독하는 대원에게 그대로 전달한다. 올린 대원이 접속을 끊어도
+  // 파일이 유지된다. 내용은 팀 암호로 암호화된 채로 올라가므로 브로커는 못 읽는다.
+
+  function vaultTopic(mediaId, seq) {
+    return state.topic + "/v/" + mediaId + "/" + seq;
+  }
+
+  function vaultFilter(mediaId) {
+    return state.topic + "/v/" + mediaId + "/+";
+  }
+
+  function isVaultTopic(topic) {
+    return topic.indexOf(state.topic + "/v/") === 0;
+  }
+
+  function publishRetained(topic, obj) {
+    if (!state.client || !state.client.connected) return;
+    var client = state.client;
+    encryptMessage(obj)
+      .then(function (envelope) {
+        if (client.connected) client.publish(topic, envelope, { qos: 0, retain: true });
+      })
+      .catch(function () {
+        // 암호화 실패 시에는 올리지 않는다.
+      });
+  }
+
+  /** 보관함에서 지운다. 빈 내용을 retain 으로 보내면 브로커가 기억을 버린다. */
+  function clearRetained(topic) {
+    if (!state.client || !state.client.connected) return;
+    state.client.publish(topic, "", { qos: 0, retain: true });
+  }
+
+  function stashedIds() {
+    try {
+      var raw = localStorage.getItem(VAULT_KEY);
+      var list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function markStashed(mediaId) {
+    try {
+      var list = stashedIds();
+      if (list.indexOf(mediaId) >= 0) return;
+      list.push(mediaId);
+      // 무한정 늘어나지 않게 최근 것만 남긴다.
+      if (list.length > 500) list = list.slice(list.length - 500);
+      localStorage.setItem(VAULT_KEY, JSON.stringify(list));
+    } catch (e) {
+      /* 저장 공간이 없으면 다음 실행에서 다시 올릴 뿐이다 */
+    }
+  }
+
+  /** 메모의 첨부를 보관함에 올린다. */
+  function stashMemoMedia(memo, force) {
+    (memo.media || []).forEach(function (item) {
+      if (!item.blob || !item.mediaId) return;
+      if (!force && stashedIds().indexOf(item.mediaId) >= 0) return;
+      stashMedia(memo.id, item);
+    });
+  }
+
+  function stashMedia(memoId, item) {
+    if (state.vaultStashing[item.mediaId]) return;
+    if (item.blob.size > VAULT_MAX_BYTES) {
+      // 큰 파일은 브로커에 남기지 않는다. 조각이 너무 많아진다.
+      return;
+    }
+    state.vaultStashing[item.mediaId] = true;
+
+    var transfer = RtlocMedia.sendBlob(
+      item.blob,
+      { name: item.name, type: item.type },
+      function (chunk) {
+        publishRetained(vaultTopic(item.mediaId, chunk.seq), {
+          type: "vault",
+          id: state.clientId,
+          memoId: memoId,
+          mediaId: item.mediaId,
+          chunk: chunk
+        });
+      }
+    );
+
+    transfer.promise.then(
+      function () {
+        delete state.vaultStashing[item.mediaId];
+        markStashed(item.mediaId);
+      },
+      function () {
+        delete state.vaultStashing[item.mediaId];
+      }
+    );
+  }
+
+  /** 보관함에 있던 첨부를 지운다(메모를 삭제할 때). */
+  function clearMemoFromVault(memo) {
+    (memo.media || []).forEach(function (item) {
+      if (!item.mediaId) return;
+      var size = item.blob ? item.blob.size : item.size;
+      if (!size) return;
+      var total = RtlocMedia.chunkCount(size);
+      for (var seq = 0; seq < total; seq++) {
+        clearRetained(vaultTopic(item.mediaId, seq));
+      }
+    });
+  }
+
+  /** 보관함을 구독해 조각을 받는다. 없으면 대원에게 요청으로 넘어간다. */
+  function fetchFromVault(memo, item) {
+    if (!state.client || !state.client.connected) {
+      requestFromTeam(memo, item);
+      return;
+    }
+
+    var mediaId = item.mediaId;
+    updateMediaProgress(mediaId, "보관함에서 찾는 중…");
+    state.vaultSubs[mediaId] = true;
+
+    state.client.subscribe(vaultFilter(mediaId), { qos: 0 }, function (err) {
+      if (err) {
+        delete state.vaultSubs[mediaId];
+        requestFromTeam(memo, item);
+        return;
+      }
+
+      setTimeout(function () {
+        // 보관함에서 아무 조각도 오지 않았으면 접속 중인 대원에게 요청한다.
+        if (state.mediaFromVault[mediaId]) return;
+        if (!state.mediaRequested[mediaId]) return; // 이미 받아서 끝난 경우
+        requestFromTeam(memo, item);
+      }, VAULT_WAIT);
+    });
+  }
+
+  function releaseVault(mediaId) {
+    if (!state.vaultSubs[mediaId]) return;
+    delete state.vaultSubs[mediaId];
+    if (state.client && state.client.connected) {
+      state.client.unsubscribe(vaultFilter(mediaId));
+    }
+  }
+
+  function handleVaultChunk(msg) {
+    if (!msg || msg.type !== "vault" || !msg.chunk || !msg.mediaId) return;
+    if (!state.vaultSubs[msg.mediaId]) return; // 지금 기다리는 첨부가 아니다
+
+    state.mediaFromVault[msg.mediaId] = true;
+    state.mediaOwnerMemo[msg.mediaId] = msg.memoId;
+    ensureAssembler().accept(msg.mediaId, msg.chunk);
+  }
+
+  /**
+   * 내가 가진 첨부 중 보관함에 없는 것을 올린다.
+   *
+   * 예전 버전에서 만든 메모, 그리고 다른 대원에게서 직접 받은 첨부가 대상이다.
+   * 이렇게 해 두면 원래 올린 대원이 앱을 지워도 팀 안에 파일이 남는다.
+   */
+  function backfillVault() {
+    RtlocMemo.listByTeam(state.topic)
+      .then(function (memos) {
+        var known = stashedIds();
+        memos.forEach(function (memo) {
+          (memo.media || []).forEach(function (item) {
+            if (!item.blob || !item.mediaId) return;
+            if (known.indexOf(item.mediaId) >= 0) return;
+            stashMedia(memo.id, item);
+          });
+        });
+      })
+      .catch(function () {
+        /* 보관함 채우기는 부가 기능이다 */
+      });
   }
 
   /**
@@ -1202,7 +1409,20 @@
       // 완성
       function (mediaId, info) {
         var memoId = state.mediaOwnerMemo[mediaId];
+        releaseVault(mediaId);
+        delete state.mediaRequested[mediaId];
         if (!memoId) return;
+
+        // 대원에게 직접 받은 파일이면 보관함에도 올려 둔다.
+        // 다음에 누가 열 때는 아무도 접속해 있지 않아도 받을 수 있다.
+        if (!state.mediaFromVault[mediaId]) {
+          stashMedia(memoId, {
+            mediaId: mediaId,
+            name: info.name,
+            type: info.type,
+            blob: info.blob
+          });
+        }
 
         RtlocMemo.attachMedia(memoId, mediaId, info).then(function () {
           var entry = state.memos[memoId];
@@ -1230,6 +1450,8 @@
       // 실패
       function (mediaId, reason) {
         delete state.mediaRequested[mediaId];
+        delete state.mediaFromVault[mediaId];
+        releaseVault(mediaId);
         updateMediaProgress(mediaId, reason + ". '다시 요청'을 눌러 보세요.");
       },
       // 진행률
@@ -1251,6 +1473,9 @@
 
   function deleteMemo(memo) {
     if (!window.confirm("이 메모를 삭제할까요? 첨부 파일도 함께 지워집니다.")) return;
+
+    // 보관함에 남은 조각까지 지운다. 안 그러면 브로커에 계속 남는다.
+    clearMemoFromVault(memo);
 
     RtlocMemo.remove(memo.id).then(function () {
       removeMemoMarker(memo.id);
@@ -2299,6 +2524,8 @@
         }
         publish({ type: "hello", id: state.clientId, name: state.callsign });
         publishPosition(true);
+        // 내가 가진 첨부 중 보관함에 없는 것을 올린다. 시작 직후 채널을 비워 두려고 조금 기다린다.
+        setTimeout(backfillVault, 4000);
       });
     });
 
@@ -2325,12 +2552,26 @@
     });
 
     client.on("message", function (topic, payload) {
-      if (topic !== state.topic) return;
-      decryptMessage(payload.toString())
-        .then(handleMessage)
-        .catch(function () {
-          // 팀 암호가 다른 사람의 메시지. 조용히 버린다.
-        });
+      var text = payload.toString();
+
+      if (topic === state.topic) {
+        decryptMessage(text)
+          .then(handleMessage)
+          .catch(function () {
+            // 팀 암호가 다른 사람의 메시지. 조용히 버린다.
+          });
+        return;
+      }
+
+      // 첨부 보관함에서 온 조각.
+      if (isVaultTopic(topic)) {
+        if (!text) return; // 지워진 조각
+        decryptMessage(text)
+          .then(handleVaultChunk)
+          .catch(function () {
+            // 암호가 다르면 읽을 수 없다.
+          });
+      }
     });
 
     if (!state.sweepTimer) state.sweepTimer = setInterval(sweep, 5000);
