@@ -118,6 +118,8 @@
         <button type="button" id="alert-btn" class="ghost" aria-pressed="true">알람: 켜짐</button>
         <button type="button" id="history-btn" class="ghost">기록</button>
         <button type="button" id="follow-btn" class="ghost" aria-pressed="true">따라가기: 켜짐</button>
+        <!-- 앱으로 실행했을 때만 보인다. 앱은 켤 때마다 새 버전을 알아서 확인한다. -->
+        <button type="button" id="update-btn" class="ghost" hidden>업데이트 확인</button>
         <button type="button" id="leave-btn" class="ghost danger">나가기</button>
       </div>
     </header>
@@ -243,14 +245,15 @@
           <!--
             display:none 인 입력은 일부 안드로이드 WebView 에서 프로그램 클릭이 무시된다.
             화면에서만 감추고(.sr-only) 실제로는 배치해 둔다.
-            accept 에 확장자를 함께 적는 이유: 갤러리가 HEIC 사진을 image/* 로 신고하지 않아
-            선택 목록에서 아예 빠지는 기기가 있다.
+            accept 은 image/* 와 video/* 만 쓴다. 확장자를 섞어 적으면 WebView 가 종류를
+            "*&#47;*" 로 바꾸고 EXTRA_MIME_TYPES 를 덧붙이는데, 그 조합에서 갤러리 사진을
+            고를 수 없게 되는 기기가 있었다.
           -->
           <input
             id="memo-photo-input"
             class="sr-only"
             type="file"
-            accept="image/*,.heic,.heif,.jpg,.jpeg,.png,.webp"
+            accept="image/*"
             multiple
             tabindex="-1"
             aria-hidden="true"
@@ -259,7 +262,7 @@
             id="memo-video-input"
             class="sr-only"
             type="file"
-            accept="video/*,.mp4,.mov,.3gp,.mkv,.avi"
+            accept="video/*"
             multiple
             tabindex="-1"
             aria-hidden="true"

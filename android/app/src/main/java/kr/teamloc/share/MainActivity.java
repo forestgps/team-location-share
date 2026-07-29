@@ -5,6 +5,7 @@ import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,9 +13,11 @@ import android.os.Environment;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.DownloadListener;
+import android.webkit.MimeTypeMap;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -28,6 +31,7 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 
 import androidx.annotation.NonNull;
@@ -215,6 +219,9 @@ public class MainActivity extends AppCompatActivity {
         } else {
             webView.restoreState(savedInstanceState);
         }
+
+        // 새 버전이 있는지 조용히 확인한다. 6시간에 한 번만 물어본다.
+        UpdateManager.check(this, false);
     }
 
     // ---------- 권한 ----------
@@ -293,24 +300,22 @@ public class MainActivity extends AppCompatActivity {
         return false;
     }
 
-    /** 갤러리/파일 선택 인텐트. WebView 가 준 것을 쓰되 비어 있으면 채워 넣는다. */
+    /**
+     * 갤러리/파일 선택 인텐트.
+     *
+     * WebView 의 params.createIntent() 를 쓰지 않는다. accept 목록에 확장자가 섞여 있으면
+     * 종류를 "*\/*" 로 바꾸고 EXTRA_MIME_TYPES 를 덧붙이는데, 그 조합에서 갤러리가 사진을
+     * 고를 수 없게 되는 기기가 있다. 우리가 필요한 것은 사진 아니면 동영상 하나뿐이라
+     * 직접 단순하게 만든다.
+     */
     private Intent buildContentIntent(WebChromeClient.FileChooserParams params) {
-        Intent intent = null;
-        try {
-            intent = params.createIntent();
-        } catch (Exception e) {
-            Log.w(TAG, "createIntent 실패", e);
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT)
+                .setType(wantsVideo(params) ? "video/*" : "image/*")
+                .addCategory(Intent.CATEGORY_OPENABLE);
+
+        if (params != null && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
-        if (intent == null) {
-            intent = new Intent(Intent.ACTION_GET_CONTENT);
-            if (params != null && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
-                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            }
-        }
-        if (intent.getType() == null || intent.getType().isEmpty()) {
-            intent.setType(wantsVideo(params) ? "video/*" : "image/*");
-        }
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
         return intent;
     }
 
@@ -385,33 +390,193 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         if (requestCode == REQ_FILE_CHOOSER) {
-            Uri[] result = null;
-
-            if (resultCode == RESULT_OK) {
-                boolean fromPicker = data != null && (data.getData() != null || data.getClipData() != null);
-                if (fromPicker) {
-                    result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
-                } else if (captureUri != null && captureFile != null && captureFile.length() > 0) {
-                    // 카메라로 찍은 경우다. 결과 Intent 가 비어 있고 파일에만 들어 있다.
-                    result = new Uri[]{captureUri};
-                }
-            }
-
-            if (result == null || result.length == 0) {
+            if (resultCode != RESULT_OK) {
                 discardCapture();
-                result = null;
-            } else {
-                // 촬영 파일은 웹이 읽어간 뒤 다음 요청에서 정리한다.
-                captureFile = null;
+                finishFileChooser(null);
+                return;
             }
 
-            if (fileCallback != null) {
-                fileCallback.onReceiveValue(result);
+            boolean fromPicker = data != null && (data.getData() != null || data.getClipData() != null);
+
+            if (fromPicker) {
+                final Uri[] picked = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                if (picked == null || picked.length == 0) {
+                    finishFileChooser(null);
+                    return;
+                }
+
+                // 갤러리 주소를 그대로 넘기면 읽지 못하는 기기가 있어 사본을 만든다.
+                // 큰 동영상이면 시간이 걸리므로 화면을 붙잡지 않도록 딴 스레드에서 한다.
+                final ValueCallback<Uri[]> pending = fileCallback;
                 fileCallback = null;
+                if (pending == null) return;
+
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final Uri[] copies = localCopies(picked);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                pending.onReceiveValue(copies);
+                            }
+                        });
+                    }
+                }, "attach-copy").start();
+                return;
+            }
+
+            // 카메라로 찍은 경우다. 결과 Intent 가 비어 있고 파일에만 들어 있다.
+            if (captureUri != null && captureFile != null && captureFile.length() > 0) {
+                Uri[] shot = new Uri[]{captureUri};
+                captureFile = null; // 웹이 읽어간 뒤 다음 요청에서 정리한다
+                finishFileChooser(shot);
+            } else {
+                discardCapture();
+                finishFileChooser(null);
             }
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    /** 파일 선택 결과를 웹에 돌려준다. null 이라도 반드시 한 번은 불러야 한다. */
+    private void finishFileChooser(@Nullable Uri[] result) {
+        if (fileCallback == null) return;
+        fileCallback.onReceiveValue(result);
+        fileCallback = null;
+    }
+
+    /**
+     * 갤러리가 돌려준 주소를 앱 캐시로 복사하고 우리 FileProvider 주소로 바꿔 준다.
+     *
+     * 왜 복사하나. 갤러리마다 돌려주는 주소의 성격이 다르다(content:// / file:// / 미디어
+     * 문서 주소). 어떤 조합에서는 WebView 가 그 파일을 읽지 못해 첨부가 0바이트로 끝난다.
+     * 촬영 경로는 우리가 만든 파일을 넘겨서 잘 동작했으므로, 갤러리도 같은 모양으로
+     * 맞춰 주면 기기별 차이가 사라진다.
+     *
+     * 복사에 실패하면 원래 주소를 그대로 돌려준다(지금보다 나빠지지 않게).
+     */
+    private Uri[] localCopies(Uri[] picked) {
+        File dir = new File(getCacheDir(), "picked");
+        cleanOldFiles(dir, 60 * 60 * 1000L); // 한 시간 지난 사본은 지운다
+        if (!dir.exists() && !dir.mkdirs()) return picked;
+
+        Uri[] out = new Uri[picked.length];
+        for (int i = 0; i < picked.length; i++) {
+            out[i] = copyToCache(dir, picked[i]);
+            if (out[i] == null) out[i] = picked[i];
+        }
+        return out;
+    }
+
+    @Nullable
+    private Uri copyToCache(File dir, Uri source) {
+        if (source == null) return null;
+        // 아주 큰 동영상은 사본을 만들지 않는다. 캐시를 두 배로 쓰는 값이 크다.
+        if (sizeOf(source) > 64L * 1024 * 1024) return null;
+
+        InputStream in = null;
+        OutputStream out = null;
+        File target = null;
+        try {
+            in = getContentResolver().openInputStream(source);
+            if (in == null) return null;
+
+            target = new File(dir, System.currentTimeMillis() + "-" + displayNameOf(source));
+            out = new FileOutputStream(target);
+
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            long total = 0;
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+                total += read;
+            }
+            out.flush();
+
+            if (total == 0) {
+                if (!target.delete()) Log.w(TAG, "빈 사본 삭제 실패");
+                return null;
+            }
+            return FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", target);
+        } catch (Exception e) {
+            Log.w(TAG, "고른 파일 복사 실패", e);
+            if (target != null && target.exists() && !target.delete()) {
+                Log.w(TAG, "실패한 사본 삭제 실패");
+            }
+            return null;
+        } finally {
+            closeSilently(in);
+            closeSilently(out);
+        }
+    }
+
+    /** 파일 크기. 알 수 없으면 0 을 돌려준다. */
+    private long sizeOf(Uri source) {
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(source,
+                    new String[]{OpenableColumns.SIZE}, null, null, null);
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                return cursor.getLong(0);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "크기를 읽을 수 없음", e);
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+        return 0;
+    }
+
+    /** 첨부 목록에 뜰 이름. 확장자가 있어야 WebView 가 종류를 제대로 잡는다. */
+    private String displayNameOf(Uri source) {
+        String name = null;
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(source,
+                    new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                name = cursor.getString(0);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "이름을 읽을 수 없음", e);
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+
+        if (name == null || name.trim().isEmpty()) name = source.getLastPathSegment();
+        name = sanitizeFileName(name);
+
+        if (name.isEmpty() || name.lastIndexOf('.') <= 0) {
+            String mime = getContentResolver().getType(source);
+            String ext = mime == null ? null
+                    : MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
+            if (ext == null) ext = "jpg";
+            if (name.isEmpty()) name = "attachment";
+            name = name + "." + ext;
+        }
+        return name;
+    }
+
+    private static void cleanOldFiles(File dir, long maxAgeMillis) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        long cutoff = System.currentTimeMillis() - maxAgeMillis;
+        for (File file : files) {
+            if (file.lastModified() < cutoff && !file.delete()) {
+                Log.w(TAG, "오래된 사본 삭제 실패: " + file.getName());
+            }
+        }
+    }
+
+    private static void closeSilently(@Nullable java.io.Closeable target) {
+        if (target == null) return;
+        try {
+            target.close();
+        } catch (Exception ignored) {
+            /* 이미 닫힘 */
+        }
     }
 
     // ---------- 백그라운드 추적 ----------
@@ -715,6 +880,30 @@ public class MainActivity extends AppCompatActivity {
          * 메시지 도착 진동. 웹의 navigator.vibrate 가 막히는 기기가 있어
          * 네이티브로 한 번 더 확실히 울린다. 알람을 끈 경우 웹이 호출하지 않는다.
          */
+        /**
+         * 새 버전을 지금 확인한다. 웹의 "업데이트 확인" 버튼이 부른다.
+         * 최신이면 최신이라고 알려 준다(자동 확인은 조용히 지나간다).
+         */
+        @JavascriptInterface
+        public void checkUpdate() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    UpdateManager.check(MainActivity.this, true);
+                }
+            });
+        }
+
+        /** 웹 화면에 표시할 앱 버전. */
+        @JavascriptInterface
+        public String appVersion() {
+            try {
+                return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
         @JavascriptInterface
         public void notifyMessage(String sender, String text) {
             Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
@@ -736,6 +925,8 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         // 화면을 보고 있는 동안에는 서비스가 알림 팝업을 띄우지 않게 한다.
         TrackerService.appForeground = true;
+        // 며칠씩 켜 두는 기기도 있다. 돌아올 때마다 확인하되 시간 제한이 걸러 준다.
+        UpdateManager.check(this, false);
     }
 
     @Override

@@ -24,6 +24,13 @@
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!--
+      앱이 스스로 새 버전을 내려받아 설치 화면을 띄울 때 쓴다.
+      스토어에 올린 앱이 아니라 자동 업데이트를 직접 해야 한다.
+      설치 여부는 사용자가 확인 화면에서 결정한다(안드로이드가 무음 설치를 허용하지 않는다).
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       임무 영상·기록을 다운로드 폴더에 저장할 때 쓴다.
       안드로이드 10(API 29) 이상은 MediaStore 로 쓰므로 권한이 필요 없다.
     -->

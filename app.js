@@ -96,6 +96,7 @@
     missionEndBtn: document.getElementById("mission-end-btn"),
     missionClock: document.getElementById("mission-clock"),
     bgBtn: document.getElementById("bg-btn"),
+    updateBtn: document.getElementById("update-btn"),
     historyBtn: document.getElementById("history-btn"),
     chatBtn: document.getElementById("chat-btn"),
     chatUnread: document.getElementById("chat-unread"),
@@ -2062,6 +2063,7 @@
 
     el.bgBtn.hidden = false;
     syncBackgroundButton();
+    setupUpdateButton(bridge);
 
     el.bgBtn.addEventListener("click", function () {
       var on = isBackgroundTracking();
@@ -2089,6 +2091,32 @@
     });
 
     setInterval(syncBackgroundButton, 5000);
+  }
+
+  /**
+   * 앱은 켤 때마다 새 버전을 스스로 확인한다(6시간에 한 번).
+   * 이 버튼은 기다리지 않고 지금 확인하고 싶을 때 쓴다.
+   */
+  function setupUpdateButton(bridge) {
+    if (typeof bridge.checkUpdate !== "function") return; // 구버전 앱
+
+    var version = "";
+    try {
+      if (typeof bridge.appVersion === "function") version = bridge.appVersion();
+    } catch (e) {
+      /* 구버전 앱 */
+    }
+
+    el.updateBtn.hidden = false;
+    el.updateBtn.textContent = version ? "업데이트 확인 (v" + version + ")" : "업데이트 확인";
+
+    el.updateBtn.addEventListener("click", function () {
+      try {
+        bridge.checkUpdate();
+      } catch (e) {
+        toast("업데이트를 확인할 수 없습니다.", 5000);
+      }
+    });
   }
 
   function isBackgroundTracking() {

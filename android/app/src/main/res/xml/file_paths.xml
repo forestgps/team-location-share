@@ -5,5 +5,10 @@
   FileProvider 는 허용 경로를 이 파일에서 읽는다.
 -->
 <paths>
+    <!-- 즉석 촬영 결과 -->
     <cache-path name="captures" path="captures/" />
+    <!-- 갤러리에서 고른 파일의 사본 -->
+    <cache-path name="picked" path="picked/" />
+    <!-- 내려받은 업데이트 APK -->
+    <cache-path name="updates" path="updates/" />
 </paths>
