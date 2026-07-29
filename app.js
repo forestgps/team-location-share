@@ -407,8 +407,9 @@
     el.memoHere.addEventListener("click", moveDraftToMyPosition);
     // 첨부 버튼은 label 이므로 파일 선택 창은 브라우저가 직접 연다.
     // 자바스크립트가 할 일은 작성 중인 내용을 잃지 않게 남겨 두는 것뿐이다.
-    bindFilePickerLabel(el.memoPhotoBtn, el.memoPhotoInput);
-    bindFilePickerLabel(el.memoVideoBtn, el.memoVideoInput);
+    setupNativeAttachReceiver();
+    bindFilePickerLabel(el.memoPhotoBtn, el.memoPhotoInput, "image");
+    bindFilePickerLabel(el.memoVideoBtn, el.memoVideoInput, "video");
     el.memoPhotoInput.addEventListener("change", onAttachmentPicked);
     el.memoVideoInput.addEventListener("change", onAttachmentPicked);
     el.memoDetailClose.addEventListener("click", closeMemoDetail);
@@ -497,7 +498,24 @@
    * 화면이 처음부터 다시 시작되고 작성 중이던 메모가 사라진다(첨부가 조용히 무시되는
    * 원인이었다). 그래서 고르기 전에 초안을 남겨 두고, 다시 시작되면 복원한다.
    */
-  function bindFilePickerLabel(label, input) {
+  function bindFilePickerLabel(label, input, kind) {
+    // 앱이면 앱이 직접 고르고 읽는다. 웹 파일 입력을 거치면 기기에 따라 결과가
+    // 화면까지 오지 않아 첨부가 조용히 사라졌다.
+    if (nativeAttachAvailable()) {
+      label.removeAttribute("for"); // 파일 입력이 같이 열리지 않게 끊는다
+      label.addEventListener("click", function () {
+        if (label.getAttribute("aria-disabled") === "true") return;
+        requestNativeAttachment(kind);
+      });
+      label.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        if (label.getAttribute("aria-disabled") === "true") return;
+        requestNativeAttachment(kind);
+      });
+      return;
+    }
+
     label.addEventListener("click", function () {
       rememberPendingMemoDraft();
     });
@@ -518,6 +536,96 @@
     // 같은 파일을 연달아 고를 수 있게 입력값을 비운다.
     input.value = "";
     if (files.length === 0) return;
+    addFilesToDraft(files);
+  }
+
+  // ---------- 앱에서 넘어오는 첨부 받기 ----------
+
+  function nativeAttachAvailable() {
+    var bridge = window.AndroidBridge;
+    return !!(bridge && typeof bridge.pickAttachment === "function");
+  }
+
+  function requestNativeAttachment(kind) {
+    rememberPendingMemoDraft();
+    try {
+      window.AndroidBridge.pickAttachment(kind === "video" ? "video" : "image");
+    } catch (e) {
+      toast("파일 선택 창을 열 수 없습니다: " + ((e && e.message) || e), 6000);
+    }
+  }
+
+  /**
+   * 앱이 파일을 조각으로 밀어 넣는 창구.
+   *
+   * 앱은 begin → chunk(여러 번) → end 순서로 부른다. 각 함수는 "ok" 를 돌려주고,
+   * 앱은 그 값으로 화면이 살아 있는지 확인한다.
+   */
+  function setupNativeAttachReceiver() {
+    var jobs = Object.create(null);
+
+    function decode(base64) {
+      var binary = atob(base64);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    window.RtlocNativeAttach = {
+      begin: function (id, name, type, size) {
+        jobs[id] = { name: name || "첨부", type: type || "", size: size || 0, parts: [], bytes: 0 };
+        if (size > 4 * 1024 * 1024) toast("파일을 가져오는 중입니다. 잠시만 기다려 주세요.", 5000);
+        return "ok";
+      },
+
+      chunk: function (id, base64) {
+        var job = jobs[id];
+        if (!job) return "no-job";
+        try {
+          var bytes = decode(base64);
+          job.parts.push(bytes);
+          job.bytes += bytes.length;
+        } catch (e) {
+          delete jobs[id];
+          toast("첨부를 받는 중 오류가 났습니다: " + ((e && e.message) || e), 7000);
+          return "error";
+        }
+        return "ok";
+      },
+
+      end: function (id) {
+        var job = jobs[id];
+        delete jobs[id];
+        if (!job) return "no-job";
+
+        try {
+          var blob = new Blob(job.parts, { type: job.type || "application/octet-stream" });
+          var file;
+          try {
+            file = new File([blob], job.name, { type: blob.type });
+          } catch (e) {
+            // File 생성자가 없는 옛 WebView 대비
+            file = blob;
+            file.name = job.name;
+          }
+          addFilesToDraft([file]);
+        } catch (e) {
+          toast("첨부를 만들지 못했습니다: " + ((e && e.message) || e), 7000);
+        }
+        return "ok";
+      },
+
+      fail: function (id, reason) {
+        delete jobs[id];
+        toast("첨부를 가져오지 못했습니다: " + (reason || "알 수 없는 이유"), 7000);
+        return "ok";
+      }
+    };
+  }
+
+  /** 고른 파일들을 작성 중인 메모에 넣는다. 웹/앱 두 경로가 함께 쓴다. */
+  function addFilesToDraft(files) {
+    if (!files || files.length === 0) return;
 
     if (!state.memoDraft) {
       toast("메모 작성 창이 닫혀 첨부를 넣을 수 없습니다. 메모를 다시 열고 첨부해 주세요.", 7000);

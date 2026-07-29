@@ -2,6 +2,7 @@ package kr.teamloc.share;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.ClipData;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -58,6 +59,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQ_PERMISSIONS = 100;
     private static final int REQ_BACKGROUND_LOCATION = 101;
     private static final int REQ_FILE_CHOOSER = 102;
+    private static final int REQ_NATIVE_PICK = 103;
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
@@ -313,13 +315,16 @@ public class MainActivity extends AppCompatActivity {
      * 직접 단순하게 만든다.
      */
     private Intent buildContentIntent(WebChromeClient.FileChooserParams params) {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT)
-                .setType(wantsVideo(params) ? "video/*" : "image/*")
-                .addCategory(Intent.CATEGORY_OPENABLE);
+        boolean multiple = params != null
+                && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+        return buildContentIntent(wantsVideo(params), multiple);
+    }
 
-        if (params != null && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        }
+    private Intent buildContentIntent(boolean video, boolean multiple) {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT)
+                .setType(video ? "video/*" : "image/*")
+                .addCategory(Intent.CATEGORY_OPENABLE);
+        if (multiple) intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         return intent;
     }
 
@@ -458,7 +463,203 @@ public class MainActivity extends AppCompatActivity {
             }
             return;
         }
+
+        if (requestCode == REQ_NATIVE_PICK) {
+            markChooserPending(false);
+            onNativePickResult(resultCode, data);
+            return;
+        }
+
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    // ---------- 네이티브 첨부 ----------
+    //
+    // WebView 의 <input type=file> 을 거치는 길은 기기에 따라 결과가 화면까지 오지 않는다.
+    // 그래서 앱에서만은 다른 길을 쓴다. 앱이 직접 파일을 골라 읽고, 바이트를 조각으로 잘라
+    // 화면(자바스크립트)에 밀어 넣는다. WebView 의 파일 처리를 전혀 쓰지 않으므로 기기별
+    // 차이가 끼어들 여지가 없다.
+
+    /** 웹이 "사진 첨부"를 눌렀을 때 앱이 여는 선택 화면. */
+    private void startNativePicker(boolean video) {
+        discardCapture();
+
+        Intent content = buildContentIntent(video, true);
+        Intent capture = buildCaptureIntent(video);
+
+        Intent chooser = new Intent(Intent.ACTION_CHOOSER)
+                .putExtra(Intent.EXTRA_INTENT, content)
+                .putExtra(Intent.EXTRA_TITLE,
+                        getString(video ? R.string.pick_video : R.string.pick_photo));
+        if (capture != null) {
+            chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{capture});
+        }
+
+        if (startNativePick(chooser)) return;
+        if (startNativePick(content)) return;
+        if (startNativePick(openDocumentFallback(content))) return;
+
+        discardCapture();
+        Toast.makeText(this, R.string.file_chooser_failed, Toast.LENGTH_LONG).show();
+    }
+
+    private boolean startNativePick(Intent intent) {
+        if (intent == null) return false;
+        try {
+            startActivityForResult(intent, REQ_NATIVE_PICK);
+            markChooserPending(true);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "선택 화면을 열 수 없음: " + intent.getAction(), e);
+            return false;
+        }
+    }
+
+    private void onNativePickResult(int resultCode, @Nullable Intent data) {
+        final java.util.List<Uri> picked = new java.util.ArrayList<>();
+
+        if (resultCode == RESULT_OK) {
+            if (data != null && data.getClipData() != null) {
+                ClipData clip = data.getClipData();
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri item = clip.getItemAt(i).getUri();
+                    if (item != null) picked.add(item);
+                }
+            } else if (data != null && data.getData() != null) {
+                picked.add(data.getData());
+            } else if (captureUri != null && captureFile != null && captureFile.length() > 0) {
+                // 촬영한 경우. 결과 Intent 는 비어 있고 우리 파일에만 들어 있다.
+                picked.add(captureUri);
+            }
+        }
+
+        if (picked.isEmpty()) {
+            discardCapture();
+            return; // 취소한 경우다. 조용히 지나간다.
+        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (Uri uri : picked) {
+                    sendFileToWeb(uri);
+                }
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        discardCapture();
+                    }
+                });
+            }
+        }, "attach-stream").start();
+    }
+
+    /** 파일 하나를 읽어 화면으로 보낸다. 조각 크기는 192KB(base64 로 약 256KB). */
+    private void sendFileToWeb(Uri uri) {
+        String name = displayNameOf(uri);
+        String type = getContentResolver().getType(uri);
+        if (type == null || type.isEmpty()) type = guessTypeFromName(name);
+        long size = sizeOf(uri);
+        String id = "n" + System.nanoTime();
+
+        InputStream in = null;
+        try {
+            in = getContentResolver().openInputStream(uri);
+            if (in == null) {
+                toastOnUi(R.string.attach_read_failed);
+                return;
+            }
+
+            // 첫 호출에서 화면이 받을 준비가 됐는지 확인한다.
+            evalJs("window.RtlocNativeAttach&&window.RtlocNativeAttach.begin("
+                    + js(id) + "," + js(name) + "," + js(type) + "," + size + ")", true);
+
+            byte[] buffer = new byte[192 * 1024];
+            int read;
+            long total = 0;
+            while ((read = in.read(buffer)) > 0) {
+                String chunk = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP);
+                evalJs("window.RtlocNativeAttach&&window.RtlocNativeAttach.chunk("
+                        + js(id) + "," + js(chunk) + ")", false);
+                total += read;
+            }
+
+            if (total == 0) {
+                evalJs("window.RtlocNativeAttach&&window.RtlocNativeAttach.fail("
+                        + js(id) + "," + js("빈 파일") + ")", false);
+                toastOnUi(R.string.attach_read_failed);
+                return;
+            }
+
+            evalJs("window.RtlocNativeAttach&&window.RtlocNativeAttach.end(" + js(id) + ")", false);
+        } catch (Exception e) {
+            Log.w(TAG, "첨부 전달 실패", e);
+            evalJs("window.RtlocNativeAttach&&window.RtlocNativeAttach.fail("
+                    + js(id) + "," + js(String.valueOf(e.getMessage())) + ")", false);
+            toastOnUi(R.string.attach_read_failed);
+        } finally {
+            closeSilently(in);
+        }
+    }
+
+    /**
+     * 화면에서 자바스크립트를 실행한다.
+     * @param checkReceiver true 면 받는 쪽이 있는지 확인하고, 없으면 알려 준다.
+     *                      (화면이 다시 로드되면 받을 함수가 사라진다)
+     */
+    private void evalJs(final String script, final boolean checkReceiver) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webView == null) return;
+                webView.evaluateJavascript(script, !checkReceiver ? null : new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        // 받는 쪽이 있으면 "ok" 를 돌려준다.
+                        if (value != null && value.contains("ok")) return;
+                        Toast.makeText(MainActivity.this, R.string.attach_no_receiver,
+                                Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
+    }
+
+    /** 자바스크립트 문자열 리터럴로 감싼다. 파일 이름에 따옴표가 있어도 깨지지 않게. */
+    private static String js(String value) {
+        if (value == null) return "\"\"";
+        StringBuilder out = new StringBuilder("\"");
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '"') out.append("\\\"");
+            else if (c == '\\') out.append("\\\\");
+            else if (c == '\n') out.append("\\n");
+            else if (c == '\r') out.append("\\r");
+            else if (c == '\t') out.append("\\t");
+            else if (c < 0x20) out.append(String.format("\\u%04x", (int) c));
+            else out.append(c);
+        }
+        return out.append('"').toString();
+    }
+
+    /** 확장자로 종류를 추측한다. 제공자가 종류를 비워서 주는 경우가 있다. */
+    private static String guessTypeFromName(String name) {
+        String lower = name == null ? "" : name.toLowerCase(java.util.Locale.US);
+        int dot = lower.lastIndexOf('.');
+        String ext = dot < 0 ? "" : lower.substring(dot + 1);
+        String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        if (mime != null) return mime;
+        if (ext.equals("heic") || ext.equals("heif")) return "image/" + ext;
+        return "application/octet-stream";
+    }
+
+    private void toastOnUi(final int resId) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, resId, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     /** 파일 선택 결과를 웹에 돌려준다. null 이라도 반드시 한 번은 불러야 한다. */
@@ -917,6 +1118,21 @@ public class MainActivity extends AppCompatActivity {
          * 메시지 도착 진동. 웹의 navigator.vibrate 가 막히는 기기가 있어
          * 네이티브로 한 번 더 확실히 울린다. 알람을 끈 경우 웹이 호출하지 않는다.
          */
+        /**
+         * 앱에서 첨부를 고른다. 웹의 파일 입력을 쓰지 않고 앱이 직접 처리한다.
+         * @param kind "video" 면 동영상, 그밖에는 사진
+         */
+        @JavascriptInterface
+        public void pickAttachment(final String kind) {
+            final boolean video = "video".equals(kind);
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    startNativePicker(video);
+                }
+            });
+        }
+
         /**
          * 새 버전을 지금 확인한다. 웹의 "업데이트 확인" 버튼이 부른다.
          * 최신이면 최신이라고 알려 준다(자동 확인은 조용히 지나간다).
