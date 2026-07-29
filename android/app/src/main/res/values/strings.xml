@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">팀 위치 공유</string>
+
+    <string name="launch_url" translatable="false">https://wjk3061-ops.github.io/team-location-share/</string>
+    <string name="launch_host" translatable="false">wjk3061-ops.github.io</string>
+    <string name="default_broker" translatable="false">wss://broker.emqx.io:8084/mqtt</string>
+
+    <string name="tracking_channel">위치 추적</string>
+    <string name="message_channel">팀 메시지</string>
+    <string name="tracking_starting">위치 추적을 준비하는 중…</string>
+    <string name="messaging_active">팀 메시지를 받는 중 (위치 추적 꺼짐)</string>
+    <string name="tracking_active">화면이 꺼져도 팀에 위치를 보내는 중</string>
+    <string name="tracking_offline">브로커에 연결하지 못했습니다. 재시도 중…</string>
+    <string name="tracking_no_permission">위치 권한이 없어 추적할 수 없습니다.</string>
+    <string name="tracking_stop">중지</string>
+
+    <string name="need_background_location">화면이 꺼져도 위치를 보내려면 위치 권한을 "항상 허용"으로 설정해 주세요.</string>
+    <string name="file_chooser_failed">파일을 선택할 수 없습니다.</string>
+    <string name="save_failed">파일을 저장할 수 없습니다.</string>
+    <string name="saved_to_downloads">다운로드 폴더에 저장했습니다: %1$s (%2$d KB)</string>
+</resources>

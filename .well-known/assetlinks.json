@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "kr.teamloc.share",
+      "sha256_cert_fingerprints": [
+        "56:8E:F5:13:5D:4E:E3:03:71:A3:08:A7:50:9A:C6:19:EC:1D:64:5C:20:DF:B2:90:BD:9B:52:A6:C2:64:75:42"
+      ]
+    }
+  }
+]

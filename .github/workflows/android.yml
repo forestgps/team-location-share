@@ -1,0 +1,107 @@
+name: Android APK
+
+# APK 빌드를 GitHub 서버에서 대신 돌린다.
+# 아무도 JDK 나 안드로이드 SDK 를 설치할 필요가 없다.
+#
+# 쓰는 방법
+#   1. 저장소 Actions 탭 -> Android APK -> Run workflow  (수동 빌드, 결과는 Artifacts)
+#   2. v1.0.0 처럼 태그를 붙여 push  -> 서명된 APK 가 Releases 에 자동 업로드
+#
+# 서명 키를 쓰려면 저장소 Settings -> Secrets and variables -> Actions 에 등록한다.
+#   KEYSTORE_BASE64   release.keystore 를 base64 로 인코딩한 문자열
+#   KEYSTORE_PASSWORD 키스토어 암호
+#   KEY_ALIAS         키 별칭 (기본 teamloc)
+#   KEY_PASSWORD      키 암호
+# 등록하지 않으면 서명 없는 디버그 APK 만 만들어진다.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+
+      - name: JDK 17 준비
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 안드로이드 SDK 준비
+        uses: android-actions/setup-android@v3
+
+      - name: 서명 키 복원
+        id: signing
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "서명 키가 등록되지 않았습니다. 디버그 APK 만 만듭니다."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          {
+            echo "storeFile=release.keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=${KEY_ALIAS:-teamloc}"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 빌드
+        working-directory: android
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            gradle assembleRelease --no-daemon
+          else
+            gradle assembleDebug --no-daemon
+          fi
+
+      - name: 서명 키 삭제
+        if: always()
+        working-directory: android
+        run: rm -f release.keystore keystore.properties
+
+      - name: APK 이름 정리
+        id: apk
+        run: |
+          FOUND=$(find android/app/build/outputs/apk -name '*.apk' | head -n 1)
+          echo "path=$FOUND" >> "$GITHUB_OUTPUT"
+          cp "$FOUND" "team-location-share.apk"
+          ls -lh team-location-share.apk
+
+      - name: 빌드 결과 올리기
+        uses: actions/upload-artifact@v4
+        with:
+          name: team-location-share-apk
+          path: team-location-share.apk
+          retention-days: 30
+
+      - name: 릴리스에 첨부
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: team-location-share.apk
+          body: |
+            팀 위치 공유 안드로이드 앱입니다.
+
+            휴대폰에서 아래 APK 를 내려받아 설치하세요.
+            처음 설치할 때는 "출처를 알 수 없는 앱" 설치를 허용해야 합니다.
+
+            설치 후 위치 권한을 **항상 허용**으로 설정해야 화면이 꺼진 상태에서도
+            팀에 위치가 전달됩니다.

@@ -1,0 +1,8 @@
+// 최상위 빌드 스크립트
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

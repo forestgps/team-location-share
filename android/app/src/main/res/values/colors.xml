@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 웹 화면과 같은 어두운 배경으로 맞춘다. -->
+    <color name="colorPrimary">#0F1115</color>
+    <color name="backgroundColor">#0F1115</color>
+    <color name="navigationColor">#0F1115</color>
+</resources>

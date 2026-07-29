@@ -1,0 +1,16 @@
+# cloudflared 실행 파일(약 54MB). share.ps1 이 없으면 자동으로 내려받습니다.
+tools/
+
+# 실행할 때마다 새로 생성되는 런타임 산출물
+.logs/
+public-url.js
+
+# 안드로이드 서명 키와 빌드 산출물. 절대 커밋하지 않는다.
+android/release.keystore
+android/keystore.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab

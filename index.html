@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>팀 실시간 위치 공유</title>
+
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="description" content="같은 소속팀 대원끼리만 위치를 실시간 공유하는 종단간 암호화 지도" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="팀 위치" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 접속(입장) 화면 -->
+  <div id="join-screen" class="screen">
+    <form id="join-form" class="card" autocomplete="off">
+      <h1>팀 실시간 위치 공유</h1>
+      <p class="lead">
+        <strong>소속팀 이름</strong>과 <strong>팀 암호</strong>가 모두 같은 대원끼리만
+        서로의 위치가 보입니다. 위치 정보는 기기에서 암호화되어 전송됩니다.
+      </p>
+
+      <label for="team">소속팀 이름 <span class="req" aria-hidden="true">*</span></label>
+      <input
+        id="team"
+        name="team"
+        type="text"
+        required
+        maxlength="40"
+        placeholder="예: 알파팀"
+        aria-describedby="team-help"
+        aria-required="true"
+      />
+      <small id="team-help" class="help">필수. 대소문자와 앞뒤 공백은 무시됩니다.</small>
+
+      <label for="secret">팀 암호 <span class="req" aria-hidden="true">*</span></label>
+      <div class="input-row">
+        <input
+          id="secret"
+          name="secret"
+          type="password"
+          required
+          minlength="6"
+          maxlength="64"
+          placeholder="팀장이 배포한 공용 암호"
+          aria-describedby="secret-help"
+          aria-required="true"
+        />
+        <button type="button" id="toggle-secret" class="ghost small" aria-pressed="false">보기</button>
+      </div>
+      <small id="secret-help" class="help">
+        필수, 6자 이상. 이 암호로 위치를 암호화합니다. 암호를 모르면 팀 채널의 존재조차 알 수 없습니다.
+      </small>
+
+      <label for="callsign">내 이름 / 호출부호</label>
+      <input
+        id="callsign"
+        name="callsign"
+        type="text"
+        maxlength="24"
+        placeholder="예: 김대원 (비우면 자동 지정)"
+      />
+
+      <label class="checkbox">
+        <input id="remember" name="remember" type="checkbox" />
+        <span>이 기기에 팀 정보 기억하기</span>
+      </label>
+      <small class="help">
+        체크하면 팀 이름·암호·호출부호를 이 기기에만 저장해 다음 접속 시 바로 입장합니다.
+        공용 기기에서는 체크하지 마세요.
+      </small>
+
+      <details class="advanced">
+        <summary>고급 설정</summary>
+        <label for="broker">MQTT 브로커 (WebSocket)</label>
+        <input id="broker" name="broker" type="text" placeholder="비우면 기본 브로커 자동 선택" />
+        <small class="help">
+          비워두면 공개 브로커 여러 곳을 순서대로 시도합니다. 위치는 암호화되어 전송되므로
+          브로커는 내용을 볼 수 없지만, 가용성을 직접 보장하려면 자체 브로커 주소를 넣으세요.
+        </small>
+      </details>
+
+      <p id="form-error" class="error" role="alert" hidden></p>
+
+      <button type="submit" id="join-btn">입장하기</button>
+      <p class="notice">
+        입장하면 브라우저가 위치 권한을 요청합니다. 권한을 허용해야 내 위치가 팀에 공유됩니다.
+      </p>
+    </form>
+  </div>
+
+  <!-- 지도 화면 -->
+  <div id="map-screen" class="screen" hidden>
+    <header id="topbar">
+      <div class="topbar-left">
+        <span class="badge" id="team-badge">-</span>
+        <span id="me-label" class="me-label">-</span>
+        <span class="lock" title="종단간 암호화 적용됨" aria-label="종단간 암호화 적용됨">암호화</span>
+      </div>
+      <div class="topbar-right">
+        <span id="conn-status" class="status status--connecting">연결 중…</span>
+        <span id="mission-clock" class="mission-clock" hidden>임무 00:00:00</span>
+        <button type="button" id="bg-btn" class="ghost" aria-pressed="false" hidden>
+          화면 꺼짐 추적: 끄기
+        </button>
+        <button type="button" id="mission-start-btn" class="primary">임무 시작</button>
+        <button type="button" id="mission-end-btn" class="danger-solid" hidden>임무 종료</button>
+        <button type="button" id="chat-btn" class="ghost">
+          메시지 <span id="chat-unread" class="unread" hidden>0</span>
+        </button>
+        <button type="button" id="alert-btn" class="ghost" aria-pressed="true">알람: 켜짐</button>
+        <button type="button" id="history-btn" class="ghost">기록</button>
+        <button type="button" id="follow-btn" class="ghost" aria-pressed="true">따라가기: 켜짐</button>
+        <button type="button" id="leave-btn" class="ghost danger">나가기</button>
+      </div>
+    </header>
+
+    <main id="content">
+      <div id="map-wrap">
+        <div id="map" role="application" aria-label="팀원 위치 지도"></div>
+
+        <!-- 지도 왼쪽 상단 오버레이 -->
+        <div id="map-overlay">
+          <button type="button" id="memo-btn" class="overlay-btn" aria-pressed="false">메모</button>
+          <button type="button" id="memo-list-btn" class="overlay-btn subtle">
+            메모 목록 <span id="memo-count" class="count">0</span>
+          </button>
+        </div>
+
+        <p id="memo-hint" class="map-hint" hidden>
+          메모를 남길 위치를 지도에서 터치하세요. 다시 <strong>메모</strong>를 누르면 취소됩니다.
+        </p>
+      </div>
+
+      <aside id="sidebar" aria-label="팀원 목록">
+        <h2>팀원 <span id="member-count" class="count">0</span></h2>
+        <ul id="member-list"></ul>
+        <p id="empty-hint" class="empty-hint">
+          같은 소속팀 이름과 팀 암호로 접속한 대원이 나타나면 여기에 표시됩니다.
+        </p>
+      </aside>
+    </main>
+
+    <p id="toast" class="toast" role="status" aria-live="polite" hidden></p>
+
+    <!-- 임무 저장 창 -->
+    <div id="save-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="save-title">
+      <div class="modal-card">
+        <h2 id="save-title">임무 저장</h2>
+
+        <label for="mission-name">임무명</label>
+        <input id="mission-name" type="text" maxlength="60" placeholder="예: 3구역 수색" />
+
+        <dl id="save-summary" class="summary"></dl>
+
+        <p class="help">
+          기록은 이 기기에만 저장됩니다. 다른 기기나 서버로 전송되지 않습니다.
+        </p>
+
+        <p id="save-video-help" class="help">
+          <strong>MP4로 변환하여 저장</strong>은 기록을 저장한 뒤 이동 경로가 시간순으로
+          그려지는 영상을 만들어 기기에 내려받습니다. 만드는 데 약
+          <span id="save-video-seconds">22</span>초가 걸리고, 그동안 이 화면을 켜 둔 채
+          두어야 합니다. <strong>MP4 변환 안 하고 저장</strong>은 기록만 바로 저장합니다.
+        </p>
+
+        <div id="save-video-progress" class="video-progress" hidden aria-live="polite">
+          <div class="video-progress-bar"><span id="save-video-fill"></span></div>
+          <p id="save-video-status" class="video-progress-text">준비 중…</p>
+        </div>
+
+        <p id="save-video-error" class="save-error" hidden role="alert"></p>
+
+        <p id="save-video-manual" class="video-manual" hidden>
+          자동 저장이 막힌 것 같습니다. 아래를 눌러 직접 저장하세요.
+          <a id="save-video-link" class="ghost small" download>영상 파일 저장</a>
+        </p>
+
+        <div class="modal-actions">
+          <button type="button" id="save-video" class="primary">MP4로 변환하여 저장</button>
+          <button type="button" id="save-confirm" class="ghost">MP4 변환 안 하고 저장</button>
+          <button type="button" id="save-discard" class="ghost danger">저장 안 함</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 팀 메시지 -->
+    <div id="chat-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="chat-title">
+      <div class="modal-card modal-card--chat">
+        <h2 id="chat-title">팀 메시지</h2>
+
+        <ul id="chat-list" class="chat-list" aria-live="polite"></ul>
+        <p id="chat-empty" class="help" hidden>
+          아직 메시지가 없습니다. 접속 중인 같은 팀 대원 전원에게 전달됩니다.
+        </p>
+
+        <form id="chat-form" class="chat-form" autocomplete="off">
+          <label for="chat-input" class="sr-only">보낼 메시지</label>
+          <textarea id="chat-input" rows="2" maxlength="500" placeholder="메시지를 입력하고 보내기"></textarea>
+          <button type="submit" id="chat-send" class="primary">보내기</button>
+        </form>
+
+        <small class="help">
+          메시지는 암호화되어 전달되며 서버에 저장되지 않습니다. 접속 중인 대원만 받습니다.
+          최근 200건이 이 기기에 보관됩니다.
+        </small>
+
+        <div class="modal-actions">
+          <button type="button" id="chat-clear" class="ghost danger">기록 지우기</button>
+          <button type="button" id="chat-close" class="ghost">닫기</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 메모 작성/편집 -->
+    <div id="memo-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="memo-title">
+      <div class="modal-card">
+        <h2 id="memo-title">현장 메모</h2>
+
+        <dl id="memo-coords" class="summary"></dl>
+
+        <label for="memo-text">메모 내용</label>
+        <textarea id="memo-text" rows="4" maxlength="2000" placeholder="관측 내용, 특이사항 등"></textarea>
+
+        <label>첨부</label>
+        <div class="attach-row">
+          <button type="button" id="memo-photo-btn" class="ghost small">사진 첨부</button>
+          <button type="button" id="memo-video-btn" class="ghost small">동영상 첨부</button>
+          <input id="memo-photo-input" type="file" accept="image/*" multiple hidden />
+          <input id="memo-video-input" type="file" accept="video/*" multiple hidden />
+        </div>
+        <ul id="memo-attachments" class="attachments"></ul>
+        <small class="help">
+          첨부한 사진·동영상은 팀원이 메모를 열어 볼 때 암호화된 채널로 전송됩니다.
+          사진은 전송 속도를 위해 자동으로 축소됩니다. 동영상은 용량이 크면 시간이 걸리고,
+          전송되는 동안 내 기기가 접속 상태여야 합니다.
+        </small>
+
+        <div class="modal-actions">
+          <button type="button" id="memo-save" class="primary">저장</button>
+          <button type="button" id="memo-here" class="ghost">내 위치로 변경</button>
+          <button type="button" id="memo-cancel" class="ghost danger">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 메모 상세 -->
+    <div id="memo-detail-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="memo-detail-title">
+      <div class="modal-card">
+        <h2 id="memo-detail-title">메모 상세</h2>
+        <dl id="memo-detail-coords" class="summary"></dl>
+        <p id="memo-detail-text" class="memo-body"></p>
+        <ul id="memo-detail-media" class="attachments"></ul>
+        <p id="memo-detail-note" class="help" hidden></p>
+        <div class="modal-actions">
+          <button type="button" id="memo-copy" class="ghost">좌표 복사</button>
+          <button type="button" id="memo-edit" class="ghost">수정</button>
+          <button type="button" id="memo-delete" class="ghost danger">삭제</button>
+          <button type="button" id="memo-detail-close" class="ghost">닫기</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 메모 목록 -->
+    <div id="memo-list-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="memo-list-title">
+      <div class="modal-card">
+        <h2 id="memo-list-title">메모 목록</h2>
+        <p id="memo-list-empty" class="help" hidden>저장된 메모가 없습니다.</p>
+        <ul id="memo-list" class="history"></ul>
+        <div class="modal-actions">
+          <button type="button" id="memo-list-close" class="ghost">닫기</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 저장된 임무 목록 -->
+    <div id="history-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="history-title">
+      <div class="modal-card">
+        <h2 id="history-title">저장된 임무</h2>
+        <p id="history-empty" class="help" hidden>이 기기에 저장된 임무가 없습니다.</p>
+        <ul id="history-list" class="history"></ul>
+        <div class="modal-actions">
+          <button type="button" id="history-close" class="ghost">닫기</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"></script>
+  <script src="crypto-team.js"></script>
+  <script src="palette.js"></script>
+  <script src="alert.js"></script>
+  <script src="chat.js"></script>
+  <script src="mgrs.js"></script>
+  <script src="media.js"></script>
+  <script src="memo.js"></script>
+  <script src="mission.js"></script>
+  <script src="route-video.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="팀 위치 공유">
+  <rect width="512" height="512" rx="112" fill="#0f1115" />
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#2b303b" stroke-width="14" />
+  <circle cx="256" cy="256" r="96" fill="none" stroke="#2b303b" stroke-width="14" />
+  <circle cx="256" cy="146" r="34" fill="#4c9aff" />
+  <circle cx="161" cy="311" r="34" fill="#35c58a" />
+  <circle cx="351" cy="311" r="34" fill="#ffb020" />
+  <path d="M256 146 L161 311 L351 311 Z" fill="none" stroke="#4c9aff" stroke-width="12"
+        stroke-linejoin="round" opacity="0.55" />
+  <circle cx="256" cy="256" r="18" fill="#e7e9ee" />
+</svg>
