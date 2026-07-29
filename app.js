@@ -32,6 +32,9 @@
   var VAULT_MAX_BYTES = 6 * 1024 * 1024;
   // 보관함에서 첫 조각을 이 시간 안에 못 받으면 접속 중인 대원에게 요청한다.
   var VAULT_WAIT = 5000;
+  // 열어 보기 전에 미리 받아 둘 사진의 최대 크기와, 연달아 받을 때의 간격
+  var AUTO_FETCH_MAX = 1.5 * 1024 * 1024;
+  var AUTO_FETCH_GAP = 2500;
 
   // 대원 구분용 색상 팔레트와 중복 없는 배분 규칙은 palette.js 에 있다.
   var PALETTE = RtlocPalette.PALETTE;
@@ -81,6 +84,8 @@
     vaultSubs: Object.create(null), // 보관함을 구독 중인 첨부 (mediaId -> true)
     vaultStashing: Object.create(null), // 보관함에 올리는 중인 첨부
     mediaFromVault: Object.create(null), // 보관함에서 받은 첨부 (재업로드 방지)
+    autoFetchQueue: [], // 미리 받아 둘 사진 대기열
+    autoFetchTimer: null,
     assembler: null, // 수신 조각 조립기
     unreadCount: 0 // 읽지 않은 메시지 수
   };
@@ -870,6 +875,8 @@
             RtlocMemo.put(memo);
           }
           addMemoMarker(memo);
+          // 예전에 못 받은 사진이 있으면 지금 받아 둔다.
+          if (memo.remote) queueAutoFetch(memo);
         });
         updateMemoCount();
       })
@@ -1269,6 +1276,46 @@
     state.mediaFromVault[msg.mediaId] = true;
     state.mediaOwnerMemo[msg.mediaId] = msg.memoId;
     ensureAssembler().accept(msg.mediaId, msg.chunk);
+  }
+
+  // ---------- 사진 미리 받아 두기 ----------
+  //
+  // 메모를 열어 볼 때 받는 방식만 쓰면, 보관함이 비워진 뒤에는 아무도 그 사진을 못 본다.
+  // 사진은 작으니 도착하는 대로 미리 받아 둔다. 받아 둔 기기가 늘어날수록 팀 안에서
+  // 파일이 사라질 일이 없어진다. 동영상은 용량 때문에 열어 볼 때만 받는다.
+
+  function queueAutoFetch(memo) {
+    (memo.media || []).forEach(function (item) {
+      if (item.blob || !item.mediaId) return;
+      if (String(item.type || "").indexOf("image") !== 0) return;
+      if (item.size && item.size > AUTO_FETCH_MAX) return;
+      if (state.mediaRequested[item.mediaId]) return;
+      state.autoFetchQueue.push({ memoId: memo.id, mediaId: item.mediaId });
+    });
+    pumpAutoFetch();
+  }
+
+  function pumpAutoFetch() {
+    if (state.autoFetchTimer) return;
+    if (state.autoFetchQueue.length === 0) return;
+
+    var next = state.autoFetchQueue.shift();
+    // 한 번에 몰아 받지 않는다. 위치 공유가 밀리지 않게 간격을 둔다.
+    state.autoFetchTimer = setTimeout(function () {
+      state.autoFetchTimer = null;
+
+      RtlocMemo.get(next.memoId)
+        .then(function (memo) {
+          if (!memo) return;
+          (memo.media || []).forEach(function (item) {
+            if (item.mediaId === next.mediaId && !item.blob) requestMedia(memo, item);
+          });
+        })
+        .catch(function () {
+          /* 다음 것으로 넘어간다 */
+        })
+        .then(pumpAutoFetch);
+    }, AUTO_FETCH_GAP);
   }
 
   /**
@@ -2674,6 +2721,7 @@
                 renderDetailMedia(stored);
                 requestMissingMedia(stored);
               }
+              queueAutoFetch(stored);
             });
           });
           return;
@@ -2684,6 +2732,9 @@
             addMemoMarker(incoming);
             updateMemoCount();
             toast((incoming.author || "대원") + " 님이 메모를 남겼습니다.", 5000);
+            // 사진은 열어 보기 전에 미리 받아 둔다. 그러면 나중에 아무도 접속해
+            // 있지 않아도 이 기기에서 바로 볼 수 있다.
+            queueAutoFetch(incoming);
           })
           .catch(function () {
             // 저장에 실패해도 지도에는 띄운다.
