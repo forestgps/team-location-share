@@ -3,14 +3,14 @@
 같은 소속팀 대원끼리만 서로의 위치를 실시간으로 보는 지도. 서버가 없는 정적 사이트이고,
 위치 정보는 기기에서 암호화되어 오간다.
 
-**접속 주소** https://wjk3061-ops.github.io/team-location-share/
+**접속 주소** https://forestgps.github.io/team-location-share/
 
 <img src="qr/team-location-share-qr.png" alt="접속 주소 QR 코드" width="220" />
 
 휴대폰 카메라로 위 QR을 스캔하면 바로 접속됩니다. 대원들에게 배포할 때는
 [`qr/team-location-share-qr.png`](qr/team-location-share-qr.png) 파일을 보내거나,
 인쇄용으로는 해상도 손실이 없는 [`qr/team-location-share-qr.svg`](qr/team-location-share-qr.svg)를 쓰세요.
-브라우저에서 QR을 띄워 보여 주려면 [초대 페이지](https://wjk3061-ops.github.io/team-location-share/invite.html)를 열면 됩니다.
+브라우저에서 QR을 띄워 보여 주려면 [초대 페이지](https://forestgps.github.io/team-location-share/invite.html)를 열면 됩니다.
 
 QR에는 접속 주소만 들어 있습니다. 팀 암호는 담기지 않으니 별도로 전달해야 합니다.
 
@@ -189,7 +189,7 @@ Artifacts는 삭제하고 개인 보관본만 남긴다. 키와 암호를 아는
 `github.dev`로 바꿔도 된다.
 
 ```
-https://github.dev/wjk3061-ops/team-location-share
+https://github.dev/forestgps/team-location-share
 ```
 
 파일을 고치고 왼쪽 Source Control 탭에서 커밋하면 GitHub Pages가 자동으로 다시 빌드한다.

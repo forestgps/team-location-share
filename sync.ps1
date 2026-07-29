@@ -5,7 +5,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\sync.ps1 -Message "fix marker color"
 #
 # After a successful push, GitHub Pages rebuilds automatically and the live site
-# at https://wjk3061-ops.github.io/team-location-share/ updates within a minute.
+# at https://forestgps.github.io/team-location-share/ updates within a minute.
 
 param(
     [string]$Message = "",
@@ -79,7 +79,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Pushed. Live site: https://wjk3061-ops.github.io/team-location-share/" -ForegroundColor Green
+Write-Host "Pushed. Live site: https://forestgps.github.io/team-location-share/" -ForegroundColor Green
 
 if ($NoWait) { exit 0 }
 
@@ -92,7 +92,7 @@ Write-Host "Waiting for the GitHub Pages build of $($head.Substring(0,7)) ..." -
 
 for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Seconds 6
-    $json = & $gh api 'repos/wjk3061-ops/team-location-share/pages/builds/latest' 2>$null
+    $json = & $gh api 'repos/forestgps/team-location-share/pages/builds/latest' 2>$null
     if (-not $json) { continue }
     try { $build = $json | ConvertFrom-Json } catch { continue }
 
@@ -106,4 +106,4 @@ for ($i = 0; $i -lt 40; $i++) {
     }
 }
 
-Write-Host "Still building. Check: https://github.com/wjk3061-ops/team-location-share/deployments" -ForegroundColor DarkYellow
+Write-Host "Still building. Check: https://github.com/forestgps/team-location-share/deployments" -ForegroundColor DarkYellow

@@ -2,8 +2,8 @@
 <resources>
     <string name="app_name">팀 위치 공유</string>
 
-    <string name="launch_url" translatable="false">https://wjk3061-ops.github.io/team-location-share/</string>
-    <string name="launch_host" translatable="false">wjk3061-ops.github.io</string>
+    <string name="launch_url" translatable="false">https://forestgps.github.io/team-location-share/</string>
+    <string name="launch_host" translatable="false">forestgps.github.io</string>
     <string name="default_broker" translatable="false">wss://broker.emqx.io:8084/mqtt</string>
 
     <string name="tracking_channel">위치 추적</string>
