@@ -181,6 +181,7 @@ public class MainActivity extends AppCompatActivity {
                 if (launchChooser(content)) return true;
                 if (launchChooser(openDocumentFallback(content))) return true;
 
+
                 // 하나도 열지 못했다. 반드시 결과를 돌려주고 끝낸다.
                 discardCapture();
                 fileCallback.onReceiveValue(null);
@@ -219,6 +220,9 @@ public class MainActivity extends AppCompatActivity {
         } else {
             webView.restoreState(savedInstanceState);
         }
+
+        // 직전에 고르던 파일이 앱 재시작으로 날아갔는지 알려 준다.
+        reportInterruptedChooser();
 
         // 새 버전이 있는지 조용히 확인한다. 6시간에 한 번만 물어본다.
         UpdateManager.check(this, false);
@@ -371,11 +375,26 @@ public class MainActivity extends AppCompatActivity {
         if (intent == null) return false;
         try {
             startActivityForResult(intent, REQ_FILE_CHOOSER);
+            // 파일을 고르는 동안 시스템이 이 화면을 없앨 수 있다. 그러면 결과가 아무 데도
+            // 도착하지 않아 첨부가 조용히 사라진다. 흔적을 남겨 두고 다음 실행에서 알려 준다.
+            markChooserPending(true);
             return true;
         } catch (Exception e) {
             Log.w(TAG, "선택 화면을 열 수 없음: " + intent.getAction(), e);
             return false;
         }
+    }
+
+    private void markChooserPending(boolean pending) {
+        getSharedPreferences("attach", MODE_PRIVATE).edit()
+                .putBoolean("chooserPending", pending).apply();
+    }
+
+    /** 파일 선택 중에 앱이 다시 시작됐는지 확인하고, 그랬다면 이유를 알려 준다. */
+    private void reportInterruptedChooser() {
+        if (!getSharedPreferences("attach", MODE_PRIVATE).getBoolean("chooserPending", false)) return;
+        markChooserPending(false);
+        Toast.makeText(this, R.string.attach_interrupted, Toast.LENGTH_LONG).show();
     }
 
     /** 쓰지 않은 촬영 파일을 지운다. 캐시에 빈 파일이 쌓이지 않게. */
@@ -390,6 +409,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         if (requestCode == REQ_FILE_CHOOSER) {
+            markChooserPending(false);
+
             if (resultCode != RESULT_OK) {
                 discardCapture();
                 finishFileChooser(null);
@@ -463,9 +484,25 @@ public class MainActivity extends AppCompatActivity {
         if (!dir.exists() && !dir.mkdirs()) return picked;
 
         Uri[] out = new Uri[picked.length];
+        int failed = 0;
         for (int i = 0; i < picked.length; i++) {
             out[i] = copyToCache(dir, picked[i]);
-            if (out[i] == null) out[i] = picked[i];
+            if (out[i] == null) {
+                // 복사가 안 됐다. 원본 주소로 넘겨 보되, 어느 층에서 막혔는지 알려 준다.
+                out[i] = picked[i];
+                failed += 1;
+            }
+        }
+
+        if (failed > 0) {
+            final int count = failed;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this,
+                            getString(R.string.attach_copy_failed, count), Toast.LENGTH_LONG).show();
+                }
+            });
         }
         return out;
     }

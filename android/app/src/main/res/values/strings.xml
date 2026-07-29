@@ -17,6 +17,8 @@
 
     <string name="need_background_location">화면이 꺼져도 위치를 보내려면 위치 권한을 "항상 허용"으로 설정해 주세요.</string>
     <string name="file_chooser_failed">이 기기에서 파일 선택 창을 열 수 없습니다. 갤러리 앱이 비활성화되어 있는지 확인해 주세요.</string>
+    <string name="attach_copy_failed">파일 %1$d개를 앱으로 가져오지 못했습니다(앱 단계 실패). 다른 방법으로 한 번 더 시도합니다.</string>
+    <string name="attach_interrupted">파일을 고르는 동안 앱이 다시 시작돼 첨부가 취소되었습니다. 메모를 다시 열고 첨부해 주세요.</string>
     <string name="pick_photo">사진 선택 또는 촬영</string>
     <string name="pick_video">동영상 선택 또는 촬영</string>
 
