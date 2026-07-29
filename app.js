@@ -29,7 +29,9 @@
   // 브로커 보관함(retained 메시지)에 올린 첨부 목록. 켤 때마다 다시 올리지 않기 위함이다.
   var VAULT_KEY = "rtloc.vault.v1";
   // 보관함에 올릴 최대 크기. 이보다 크면 접속 중인 대원끼리만 주고받는다.
+  // 공개 브로커는 남의 자원이라 보수적으로, 자체 브로커는 팀이 용량을 정하므로 넉넉하게.
   var VAULT_MAX_BYTES = 6 * 1024 * 1024;
+  var PRIVATE_VAULT_MAX_BYTES = 64 * 1024 * 1024;
   // 보관함에서 첫 조각을 이 시간 안에 못 받으면 접속 중인 대원에게 요청한다.
   var VAULT_WAIT = 5000;
   // 열어 보기 전에 미리 받아 둘 사진의 최대 크기와, 연달아 받을 때의 간격
@@ -81,6 +83,9 @@
     mediaSending: Object.create(null), // 내가 보내는 중인 첨부
     chunkSeen: Object.create(null), // 다른 대원이 보내는 중인 첨부 (mediaId -> 시각)
     mediaOwnerMemo: Object.create(null), // mediaId -> memoId
+    brokerUser: "", // 자체 브로커 아이디 (없으면 빈 값)
+    brokerPass: "",
+    vaultMaxBytes: VAULT_MAX_BYTES,
     vaultSubs: Object.create(null), // 보관함을 구독 중인 첨부 (mediaId -> true)
     vaultStashing: Object.create(null), // 보관함에 올리는 중인 첨부
     mediaFromVault: Object.create(null), // 보관함에서 받은 첨부 (재업로드 방지)
@@ -100,6 +105,8 @@
     callsign: document.getElementById("callsign"),
     remember: document.getElementById("remember"),
     broker: document.getElementById("broker"),
+    brokerUser: document.getElementById("broker-user"),
+    brokerPass: document.getElementById("broker-pass"),
     formError: document.getElementById("form-error"),
     mapScreen: document.getElementById("map-screen"),
     teamBadge: document.getElementById("team-badge"),
@@ -182,6 +189,7 @@
   function init() {
     registerServiceWorker();
     restoreProfile();
+    importBrokerFromUrl();
 
     el.joinForm.addEventListener("submit", onSubmit);
     el.team.addEventListener("input", clearFormError);
@@ -237,7 +245,53 @@
     el.secret.value = saved.secret || "";
     el.callsign.value = saved.callsign || "";
     el.broker.value = saved.broker || "";
+    el.brokerUser.value = saved.brokerUser || "";
+    el.brokerPass.value = saved.brokerPass || "";
     el.remember.checked = true;
+  }
+
+  /**
+   * 초대 링크에 담긴 브로커 설정을 받아 둔다.
+   *
+   * 팀장이 자체 브로커를 쓰면 대원마다 주소와 아이디를 입력해야 하는데, 현장에서는
+   * 그게 곧 사고다. 링크(또는 QR)에 담아 보내면 한 번만 열어도 기기에 저장된다.
+   * 예: ...?b=wss://mqtt.example.com:8084/mqtt&u=team&p=암호
+   *
+   * 주소창에 암호가 남지 않도록 읽은 뒤 링크를 정리한다.
+   */
+  function importBrokerFromUrl() {
+    var params;
+    try {
+      params = new URLSearchParams(window.location.search);
+    } catch (e) {
+      return;
+    }
+
+    var broker = params.get("b");
+    var user = params.get("u");
+    var pass = params.get("p");
+    if (!broker && !user && !pass) return;
+
+    if (broker) el.broker.value = broker;
+    if (user) el.brokerUser.value = user;
+    if (pass) el.brokerPass.value = pass;
+
+    // 다음에도 쓰도록 이 기기에 저장한다.
+    el.remember.checked = true;
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      var saved = raw ? JSON.parse(raw) : {};
+      saved.broker = el.broker.value.trim();
+      saved.brokerUser = el.brokerUser.value.trim();
+      saved.brokerPass = el.brokerPass.value;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    } catch (e) {
+      /* 저장이 막히면 이번 접속에만 적용된다 */
+    }
+
+    if (window.history && history.replaceState) {
+      history.replaceState(null, "", window.location.pathname + window.location.hash);
+    }
   }
 
   function saveProfile() {
@@ -249,7 +303,9 @@
             team: state.teamName,
             secret: el.secret.value,
             callsign: state.callsign,
-            broker: el.broker.value.trim()
+            broker: el.broker.value.trim(),
+            brokerUser: el.brokerUser.value.trim(),
+            brokerPass: el.brokerPass.value
           })
         );
       } else {
@@ -298,6 +354,10 @@
     var custom = el.broker.value.trim();
     state.brokers = custom ? [custom] : DEFAULT_BROKERS.slice();
     state.brokerIndex = 0;
+    state.brokerUser = el.brokerUser.value.trim();
+    state.brokerPass = el.brokerPass.value;
+    // 자체 브로커는 보관 용량을 팀이 직접 정하므로 큰 파일도 보관한다.
+    state.vaultMaxBytes = custom ? PRIVATE_VAULT_MAX_BYTES : VAULT_MAX_BYTES;
 
     // 소리는 사용자 조작 직후에만 준비할 수 있다. 입장 버튼이 그 시점이다.
     RtlocAlert.unlock();
@@ -1190,7 +1250,7 @@
 
   function stashMedia(memoId, item) {
     if (state.vaultStashing[item.mediaId]) return;
-    if (item.blob.size > VAULT_MAX_BYTES) {
+    if (item.blob.size > state.vaultMaxBytes) {
       // 큰 파일은 브로커에 남기지 않는다. 조각이 너무 많아진다.
       return;
     }
@@ -2424,6 +2484,9 @@
     var bridge = window.AndroidBridge;
     if (!bridge || typeof bridge.startTracking !== "function") return; // 웹 브라우저
 
+    // 자체 브로커의 아이디·암호를 서비스에도 알려 준다. 없으면 넘어간다.
+    sendBrokerAuth(bridge);
+
     // 앱에 들어오면 메시지 수신 서비스를 곧바로 켠다.
     // 이게 켜져 있어야 앱을 보고 있지 않을 때도 메시지 팝업이 뜬다.
     // 위치 권한과 무관하게 동작한다.
@@ -2452,6 +2515,7 @@
         bridge.stopTracking();
         toast("화면 꺼짐 추적을 껐습니다. 이제 화면이 꺼지면 내 위치가 멈춥니다.", 5000);
       } else {
+        sendBrokerAuth(bridge);
         bridge.startTracking(
           state.teamName,
           state.secret || "",
@@ -2471,6 +2535,17 @@
     });
 
     setInterval(syncBackgroundButton, 5000);
+  }
+
+  /** 자체 브로커 자격을 네이티브 서비스에 넘긴다(구버전 앱에서는 조용히 넘어간다). */
+  function sendBrokerAuth(bridge) {
+    if (!state.brokerUser) return;
+    if (typeof bridge.setBrokerAuth !== "function") return;
+    try {
+      bridge.setBrokerAuth(state.brokerUser, state.brokerPass || "");
+    } catch (e) {
+      /* 구버전 앱 */
+    }
   }
 
   /**
@@ -2550,6 +2625,11 @@
       connectTimeout: 8000,
       keepalive: 30
     };
+    // 자체 브로커는 아이디·암호를 요구하는 경우가 많다.
+    if (state.brokerUser) {
+      options.username = state.brokerUser;
+      options.password = state.brokerPass;
+    }
     if (state.willPayload) {
       options.will = { topic: state.topic, payload: state.willPayload, qos: 0, retain: false };
     }

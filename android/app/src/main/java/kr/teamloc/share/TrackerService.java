@@ -121,6 +121,9 @@ public class TrackerService extends Service {
         String team = intent.getStringExtra("team");
         String secret = intent.getStringExtra("secret");
         String broker = intent.getStringExtra("broker");
+        // 자체 브로커는 아이디·암호를 요구하는 경우가 많다. 없으면 비워 둔다.
+        String brokerUser = orEmpty(intent.getStringExtra("brokerUser"));
+        String brokerPass = orEmpty(intent.getStringExtra("brokerPass"));
         clientId = orEmpty(intent.getStringExtra("clientId"));
         callsign = orEmpty(intent.getStringExtra("callsign"));
 
@@ -153,7 +156,7 @@ public class TrackerService extends Service {
 
         if (client == null) {
             connect(broker != null && !broker.isEmpty()
-                    ? broker : getString(R.string.default_broker));
+                    ? broker : getString(R.string.default_broker), brokerUser, brokerPass);
         }
 
         // 위치 추적을 이제 막 켠 경우에만 위치 수신을 시작한다.
@@ -219,7 +222,7 @@ public class TrackerService extends Service {
 
     // ---------- MQTT ----------
 
-    private void connect(String brokerUrl) {
+    private void connect(String brokerUrl, String user, String pass) {
         try {
             client = new MqttAsyncClient(brokerUrl, "rtloc-bg-" + clientId, new MemoryPersistence());
 
@@ -228,6 +231,10 @@ public class TrackerService extends Service {
             options.setAutomaticReconnect(true);
             options.setConnectionTimeout(10);
             options.setKeepAliveInterval(30);
+            if (user != null && !user.isEmpty()) {
+                options.setUserName(user);
+                options.setPassword(pass == null ? new char[0] : pass.toCharArray());
+            }
 
             client.connect(options, null, new org.eclipse.paho.client.mqttv3.IMqttActionListener() {
                 @Override

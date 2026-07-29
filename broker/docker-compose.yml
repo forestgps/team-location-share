@@ -1,0 +1,63 @@
+# 팀 전용 MQTT 브로커.
+#
+# 구성은 두 덩이다.
+#   emqx  : MQTT 브로커. 평문 WebSocket(8083)만 열고 바깥에는 내놓지 않는다.
+#   caddy : 도메인의 TLS 인증서를 자동으로 받아 wss:// 를 emqx 로 넘긴다.
+#
+# 브라우저는 https 페이지에서 ws:// 로 접속할 수 없다. 그래서 TLS 가 반드시 필요하고,
+# 인증서 발급을 손으로 하지 않으려고 Caddy 를 앞에 둔다.
+#
+# 쓰는 방법은 README.md 를 보세요.
+
+services:
+  emqx:
+    image: emqx/emqx:5.8.6
+    container_name: emqx
+    restart: unless-stopped
+    environment:
+      # 대시보드 관리자 암호. .env 에서 넣는다.
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD}
+      # 익명 접속 금지. 아이디·암호를 가진 대원만 붙는다.
+      EMQX_ALLOW_ANONYMOUS: "false"
+      # 첨부 보관용 retained 메시지 설정.
+      # 조각 하나가 base64 와 암호 봉투를 거치면 50KB 안쪽이라 1MB 면 넉넉하다.
+      EMQX_MQTT__MAX_PACKET_SIZE: "1MB"
+      EMQX_RETAINER__ENABLE: "true"
+      EMQX_RETAINER__MAX_PAYLOAD_SIZE: "1MB"
+      # 보관할 조각 수. 64MB 동영상 하나가 약 2700 조각이다.
+      EMQX_RETAINER__BACKEND__MAX_RETAINED_MESSAGES: "200000"
+      EMQX_RETAINER__BACKEND__STORAGE_TYPE: "disc"
+      # 이 기간이 지나면 브로커가 알아서 지운다. 0s 로 두면 영구 보관.
+      EMQX_RETAINER__MSG_EXPIRY_INTERVAL: ${RETAIN_EXPIRY:-30d}
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    expose:
+      - "8083" # WebSocket (Caddy 만 접근)
+    # 대시보드를 서버 안에서만 보려면 아래를 그대로 둔다.
+    # 바깥에서 보려면 Caddyfile 에 경로를 추가하세요.
+    ports:
+      - "127.0.0.1:18083:18083"
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: caddy
+    restart: unless-stopped
+    depends_on:
+      - emqx
+    environment:
+      BROKER_DOMAIN: ${BROKER_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "8084:8084"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  emqx-data:
+  emqx-log:
+  caddy-data:
+  caddy-config:

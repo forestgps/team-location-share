@@ -1,0 +1,22 @@
+# 도메인의 인증서를 자동으로 받아 wss:// 를 EMQX 로 넘긴다.
+#
+# 앱이 접속할 주소: wss://<도메인>:8084/mqtt
+# 8084 를 쓰는 이유는 공개 브로커들이 쓰는 포트와 같아 기억하기 쉽기 때문이다.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# 인증서 발급(HTTP-01)에는 80 포트가 필요하다.
+http://{$BROKER_DOMAIN} {
+	respond "ok" 200
+}
+
+{$BROKER_DOMAIN}:8084 {
+	# /mqtt 로 오는 WebSocket 만 브로커로 넘긴다.
+	@mqtt path /mqtt
+	reverse_proxy @mqtt emqx:8083
+
+	# 그 밖의 요청은 브로커를 노출하지 않는다.
+	respond 404
+}

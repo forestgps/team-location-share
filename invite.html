@@ -28,6 +28,14 @@
     <div id="qr"></div>
     <p><a id="link" href="#">주소를 불러오는 중…</a></p>
     <p id="source" class="warn"></p>
+    <p id="broker-row" hidden>
+      <label>
+        <input id="with-broker" type="checkbox" />
+        자체 브로커 설정도 QR에 담기
+      </label>
+      <br />
+      <span id="broker-note" class="warn"></span>
+    </p>
     <p>
       접속한 뒤 <strong>같은 소속팀 이름</strong>과 <strong>같은 팀 암호</strong>를
       입력한 대원끼리만 서로의 위치가 보입니다. 팀 암호는 QR이나 링크에 담기지 않으니
@@ -50,15 +58,52 @@
         ? "임시 터널 주소입니다. PC에서 share.ps1 이 실행 중일 때만 살아 있습니다."
         : "상시 운영 주소입니다. 언제든 접속할 수 있습니다.";
 
-      link.textContent = url;
-      link.href = url;
+      // 이 기기에 저장된 자체 브로커 설정. 있으면 QR 에 담을지 고를 수 있게 한다.
+      // 팀 암호는 담지 않는다(브로커 자격과 팀 암호는 다른 것이다).
+      var profile = null;
+      try {
+        profile = JSON.parse(localStorage.getItem("rtloc.profile.v2") || "null");
+      } catch (e) {
+        profile = null;
+      }
+      var hasBroker = !!(profile && profile.broker);
 
-      new QRCode(document.getElementById("qr"), {
+      var qr = new QRCode(document.getElementById("qr"), {
         text: url,
         width: 220,
         height: 220,
         correctLevel: QRCode.CorrectLevel.M
       });
+
+      function targetUrl(withBroker) {
+        if (!withBroker || !hasBroker) return url;
+        var query =
+          "?b=" + encodeURIComponent(profile.broker) +
+          (profile.brokerUser ? "&u=" + encodeURIComponent(profile.brokerUser) : "") +
+          (profile.brokerPass ? "&p=" + encodeURIComponent(profile.brokerPass) : "");
+        return url + query;
+      }
+
+      function render(withBroker) {
+        var next = targetUrl(withBroker);
+        link.textContent = next;
+        link.href = next;
+        qr.clear();
+        qr.makeCode(next);
+      }
+
+      render(false);
+
+      if (hasBroker) {
+        var row = document.getElementById("broker-row");
+        var box = document.getElementById("with-broker");
+        row.hidden = false;
+        document.getElementById("broker-note").textContent =
+          "브로커 주소와 아이디·암호가 QR 에 들어갑니다. 팀 밖으로 새지 않게 조심하세요.";
+        box.addEventListener("change", function () {
+          render(box.checked);
+        });
+      }
     })();
   </script>
 </body>

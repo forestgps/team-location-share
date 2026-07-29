@@ -80,10 +80,43 @@
       <details class="advanced">
         <summary>고급 설정</summary>
         <label for="broker">MQTT 브로커 (WebSocket)</label>
-        <input id="broker" name="broker" type="text" placeholder="비우면 기본 브로커 자동 선택" />
+        <input
+          id="broker"
+          name="broker"
+          type="text"
+          inputmode="url"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="비우면 기본 브로커 자동 선택"
+        />
         <small class="help">
           비워두면 공개 브로커 여러 곳을 순서대로 시도합니다. 위치는 암호화되어 전송되므로
-          브로커는 내용을 볼 수 없지만, 가용성을 직접 보장하려면 자체 브로커 주소를 넣으세요.
+          브로커는 내용을 볼 수 없지만, 가용성과 첨부 보관을 직접 보장하려면
+          자체 브로커 주소를 넣으세요. 예: wss://mqtt.내도메인:8084/mqtt
+        </small>
+
+        <label for="broker-user">브로커 아이디 (선택)</label>
+        <input
+          id="broker-user"
+          name="broker-user"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="자체 브로커가 요구할 때만"
+        />
+
+        <label for="broker-pass">브로커 암호 (선택)</label>
+        <input
+          id="broker-pass"
+          name="broker-pass"
+          type="password"
+          autocomplete="new-password"
+          placeholder="자체 브로커가 요구할 때만"
+        />
+        <small class="help">
+          자체 브로커를 쓰면 6MB가 넘는 동영상도 팀 채널에 보관됩니다(최대 64MB).
+          이 값들은 팀장이 나눠 준 초대 링크에 담아 두면 대원이 직접 입력할 필요가 없습니다.
         </small>
       </details>
 

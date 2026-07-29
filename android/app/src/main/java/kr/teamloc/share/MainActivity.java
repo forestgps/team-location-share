@@ -81,6 +81,8 @@ public class MainActivity extends AppCompatActivity {
     private String pendingCallsign;
     private String pendingClientId;
     private String pendingBroker;
+    private String pendingBrokerUser;
+    private String pendingBrokerPass;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -834,6 +836,8 @@ public class MainActivity extends AppCompatActivity {
                 .putExtra("callsign", pendingCallsign)
                 .putExtra("clientId", pendingClientId)
                 .putExtra("broker", pendingBroker)
+                .putExtra("brokerUser", pendingBrokerUser)
+                .putExtra("brokerPass", pendingBrokerPass)
                 .putExtra("trackLocation", withLocation);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1041,6 +1045,16 @@ public class MainActivity extends AppCompatActivity {
         @JavascriptInterface
         public void abortFile() {
             closeQuietly(true);
+        }
+
+        /**
+         * 자체 브로커의 아이디·암호를 기억한다. 서비스가 연결할 때 같이 쓴다.
+         * 웹이 위치/메시지 시작을 부르기 전에 먼저 호출한다.
+         */
+        @JavascriptInterface
+        public void setBrokerAuth(String user, String pass) {
+            pendingBrokerUser = user;
+            pendingBrokerPass = pass;
         }
 
         private void remember(String team, String secret, String callsign,
