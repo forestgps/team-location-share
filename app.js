@@ -23,6 +23,8 @@
   var STALE_AFTER = 45000;
   var DROP_AFTER = 150000;
   var STORAGE_KEY = "rtloc.profile.v2";
+  // 파일 선택 중 앱이 다시 시작되면 되살릴 메모 초안(세션 한정)
+  var MEMO_DRAFT_KEY = "rtloc.memoDraft.v1";
 
   // 대원 구분용 색상 팔레트와 중복 없는 배분 규칙은 palette.js 에 있다.
   var PALETTE = RtlocPalette.PALETTE;
@@ -402,12 +404,10 @@
     el.memoSave.addEventListener("click", saveMemoDraft);
     el.memoCancel.addEventListener("click", closeMemoEditor);
     el.memoHere.addEventListener("click", moveDraftToMyPosition);
-    el.memoPhotoBtn.addEventListener("click", function () {
-      el.memoPhotoInput.click();
-    });
-    el.memoVideoBtn.addEventListener("click", function () {
-      el.memoVideoInput.click();
-    });
+    // 첨부 버튼은 label 이므로 파일 선택 창은 브라우저가 직접 연다.
+    // 자바스크립트가 할 일은 작성 중인 내용을 잃지 않게 남겨 두는 것뿐이다.
+    bindFilePickerLabel(el.memoPhotoBtn, el.memoPhotoInput);
+    bindFilePickerLabel(el.memoVideoBtn, el.memoVideoInput);
     el.memoPhotoInput.addEventListener("change", onAttachmentPicked);
     el.memoVideoInput.addEventListener("change", onAttachmentPicked);
     el.memoDetailClose.addEventListener("click", closeMemoDetail);
@@ -425,6 +425,7 @@
     });
 
     loadMemos();
+    restorePendingMemoDraft();
   }
 
   // ---------- 메모: 핀 찍기 ----------
@@ -485,45 +486,191 @@
     state.memoDraft = null;
     el.memoPhotoInput.value = "";
     el.memoVideoInput.value = "";
+    forgetPendingMemoDraft();
+  }
+
+  /**
+   * 첨부 label 에 필요한 처리를 붙인다.
+   *
+   * 파일 선택 중에는 안드로이드가 앱을 메모리에서 내릴 수 있다. 그러면 돌아왔을 때
+   * 화면이 처음부터 다시 시작되고 작성 중이던 메모가 사라진다(첨부가 조용히 무시되는
+   * 원인이었다). 그래서 고르기 전에 초안을 남겨 두고, 다시 시작되면 복원한다.
+   */
+  function bindFilePickerLabel(label, input) {
+    label.addEventListener("click", function () {
+      rememberPendingMemoDraft();
+    });
+
+    // label 은 키보드 Enter/Space 로 눌리지 않는다. 직접 열어 준다.
+    label.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      if (label.getAttribute("aria-disabled") === "true") return;
+      rememberPendingMemoDraft();
+      input.click();
+    });
   }
 
   function onAttachmentPicked(event) {
-    if (!state.memoDraft) return;
-    var files = Array.prototype.slice.call(event.target.files || []);
-    event.target.value = "";
+    var input = event.target;
+    var files = Array.prototype.slice.call(input.files || []);
+    // 같은 파일을 연달아 고를 수 있게 입력값을 비운다.
+    input.value = "";
     if (files.length === 0) return;
 
-    // 사진은 팀 전송이 현실적인 크기로 줄인 뒤 첨부한다.
-    Promise.all(
-      files.map(function (file) {
-        return RtlocMedia.shrinkImage(file).then(function (blob) {
-          return {
-            mediaId: RtlocMemo.newId(),
-            name: file.name || (file.type.indexOf("video") === 0 ? "동영상" : "사진"),
-            type: blob.type || file.type,
-            size: blob.size,
-            blob: blob,
-            originalSize: file.size
-          };
-        });
-      })
-    ).then(function (items) {
-      if (!state.memoDraft) return;
+    if (!state.memoDraft) {
+      toast("메모 작성 창이 닫혀 첨부를 넣을 수 없습니다. 메모를 다시 열고 첨부해 주세요.", 7000);
+      return;
+    }
 
-      items.forEach(function (item) {
-        state.memoDraft.media.push(item);
-        if (item.size > RtlocMedia.LARGE_FILE_WARNING) {
+    var draft = state.memoDraft;
+    setAttachButtonsBusy(true);
+
+    // 사진은 팀 전송이 현실적인 크기로 줄인 뒤 첨부한다.
+    Promise.all(files.map(prepareAttachment))
+      .then(function (items) {
+        setAttachButtonsBusy(false);
+        // 처리 중에 창을 닫았으면 버린다.
+        if (state.memoDraft !== draft) return;
+
+        var added = 0;
+        var unreadable = 0;
+
+        items.forEach(function (item) {
+          if (!item.blob || item.size === 0) {
+            unreadable += 1;
+            return;
+          }
+          draft.media.push(item);
+          added += 1;
+
+          if (item.size > RtlocMedia.LARGE_FILE_WARNING) {
+            toast(
+              item.name + " 은(는) " + formatBytes(item.size) +
+                " 입니다. 팀원에게 전송되는 데 " + RtlocMedia.estimateSeconds(item.size) +
+                "초 이상 걸릴 수 있습니다.",
+              7000
+            );
+          }
+        });
+
+        renderDraftAttachments();
+
+        if (unreadable > 0) {
           toast(
-            item.name + " 은(는) " + formatBytes(item.size) +
-              " 입니다. 팀원에게 전송되는 데 " + RtlocMedia.estimateSeconds(item.size) +
-              "초 이상 걸릴 수 있습니다.",
+            "파일 " + unreadable + "개를 읽을 수 없어 제외했습니다. 다른 앱(갤러리 등)에서 고르거나 " +
+              "다시 촬영해 주세요.",
             7000
           );
         }
+        if (added > 0) toast(added + "개를 첨부했습니다. 저장을 눌러야 기록됩니다.");
+      })
+      .catch(function (err) {
+        setAttachButtonsBusy(false);
+        // 예전에는 여기서 조용히 끝나 "첨부가 안 된다"로 보였다.
+        toast("첨부 처리 실패: " + ((err && err.message) || err), 7000);
       });
+  }
 
-      renderDraftAttachments();
+  /** 파일 하나를 첨부 항목으로 만든다. 어떤 값이 빠져 있어도 던지지 않는다. */
+  function prepareAttachment(file) {
+    var srcName = (file && file.name) || "";
+    var srcType = (file && file.type) || "";
+
+    return RtlocMedia.shrinkImage(file).then(function (blob) {
+      var out = blob || file;
+      var type = (out && out.type) || srcType || guessTypeFromName(srcName);
+      return {
+        mediaId: RtlocMemo.newId(),
+        name: srcName || (type.indexOf("video") === 0 ? "동영상" : "사진"),
+        type: type,
+        size: out && typeof out.size === "number" ? out.size : 0,
+        blob: out,
+        originalSize: (file && file.size) || 0
+      };
     });
+  }
+
+  /** 파일 이름의 확장자로 종류를 추측한다(일부 기기는 type 을 비워서 준다). */
+  function guessTypeFromName(name) {
+    var ext = String(name).toLowerCase().split(".").pop();
+    if (["mp4", "mov", "3gp", "mkv", "avi", "webm"].indexOf(ext) >= 0) return "video/" + ext;
+    if (["jpg", "jpeg"].indexOf(ext) >= 0) return "image/jpeg";
+    if (["png", "webp", "gif", "heic", "heif"].indexOf(ext) >= 0) return "image/" + ext;
+    return "application/octet-stream";
+  }
+
+  function setAttachButtonsBusy(busy) {
+    // label 에는 disabled 가 없다. aria-disabled 로 표시하고 CSS 로 클릭을 막는다.
+    el.memoPhotoBtn.setAttribute("aria-disabled", String(busy));
+    el.memoVideoBtn.setAttribute("aria-disabled", String(busy));
+    el.memoPhotoBtn.textContent = busy ? "처리 중..." : "사진 첨부";
+    el.memoVideoBtn.textContent = busy ? "처리 중..." : "동영상 첨부";
+  }
+
+  // ---------- 메모: 작성 중이던 초안 지키기 ----------
+
+  function rememberPendingMemoDraft() {
+    if (!state.memoDraft) return;
+    try {
+      sessionStorage.setItem(
+        MEMO_DRAFT_KEY,
+        JSON.stringify({
+          id: state.memoDraft.id,
+          teamKey: state.topic,
+          lat: state.memoDraft.lat,
+          lng: state.memoDraft.lng,
+          text: el.memoText.value,
+          savedAt: Date.now()
+        })
+      );
+    } catch (e) {
+      /* 저장 공간이 없으면 복원을 포기한다. 첨부 자체에는 영향이 없다. */
+    }
+  }
+
+  function forgetPendingMemoDraft() {
+    try {
+      sessionStorage.removeItem(MEMO_DRAFT_KEY);
+    } catch (e) {
+      /* 무시 */
+    }
+  }
+
+  function restorePendingMemoDraft() {
+    var raw = null;
+    try {
+      raw = sessionStorage.getItem(MEMO_DRAFT_KEY);
+    } catch (e) {
+      return;
+    }
+    if (!raw) return;
+    forgetPendingMemoDraft();
+
+    var saved;
+    try {
+      saved = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+    if (!saved || saved.teamKey !== state.topic) return;
+    if (typeof saved.lat !== "number" || typeof saved.lng !== "number") return;
+    // 오래된 초안은 되살리지 않는다.
+    if (Date.now() - (saved.savedAt || 0) > 30 * 60 * 1000) return;
+
+    openMemoEditor({
+      id: saved.id || RtlocMemo.newId(),
+      teamKey: state.topic,
+      lat: saved.lat,
+      lng: saved.lng,
+      text: saved.text || "",
+      createdAt: Date.now(),
+      author: state.callsign,
+      authorId: state.clientId,
+      remote: false,
+      media: []
+    });
+    toast("파일을 고르는 동안 앱이 다시 시작돼 작성 중이던 메모를 되살렸습니다. 첨부를 다시 골라 주세요.", 8000);
   }
 
   function renderDraftAttachments() {
@@ -541,7 +688,7 @@
           ? " ← " + formatBytes(item.originalSize) + " 축소"
           : "";
       label.textContent =
-        (item.type.indexOf("video") === 0 ? "동영상 · " : "사진 · ") +
+        (String(item.type || "").indexOf("video") === 0 ? "동영상 · " : "사진 · ") +
         item.name +
         " (" +
         formatBytes(item.size) +

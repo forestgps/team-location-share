@@ -16,7 +16,9 @@
     <string name="tracking_stop">중지</string>
 
     <string name="need_background_location">화면이 꺼져도 위치를 보내려면 위치 권한을 "항상 허용"으로 설정해 주세요.</string>
-    <string name="file_chooser_failed">파일을 선택할 수 없습니다.</string>
+    <string name="file_chooser_failed">이 기기에서 파일 선택 창을 열 수 없습니다. 갤러리 앱이 비활성화되어 있는지 확인해 주세요.</string>
+    <string name="pick_photo">사진 선택 또는 촬영</string>
+    <string name="pick_video">동영상 선택 또는 촬영</string>
     <string name="save_failed">파일을 저장할 수 없습니다.</string>
     <string name="saved_to_downloads">다운로드 폴더에 저장했습니다: %1$s (%2$d KB)</string>
 </resources>

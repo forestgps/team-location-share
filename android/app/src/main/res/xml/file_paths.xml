@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  즉석 촬영한 사진·동영상을 잠깐 담아 두는 곳.
+  카메라 앱에 넘길 주소를 만들려면 FileProvider 가 필요하고,
+  FileProvider 는 허용 경로를 이 파일에서 읽는다.
+-->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

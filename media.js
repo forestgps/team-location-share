@@ -25,6 +25,7 @@
   var IMAGE_QUALITY = 0.75;
   var LARGE_FILE_WARNING = 15 * 1024 * 1024; // 이 이상이면 경고
   var ASSEMBLE_TIMEOUT = 45000; // 조각이 끊기면 이 시간 후 실패 처리
+  var SHRINK_TIMEOUT = 12000; // 사진 축소가 이 시간 안에 안 끝나면 원본을 그대로 쓴다
 
   // ---------- 사진 축소 ----------
 
@@ -33,44 +34,87 @@
    * 축소가 불가능하거나 원본이 더 작으면 원본을 그대로 돌려준다.
    */
   function shrinkImage(file) {
-    if (!file.type || file.type.indexOf("image/") !== 0) return Promise.resolve(file);
+    var type = (file && file.type) || "";
+    if (type.indexOf("image/") !== 0) return Promise.resolve(file);
     // GIF 는 애니메이션이 깨지므로 건드리지 않는다.
-    if (file.type === "image/gif") return Promise.resolve(file);
+    if (type === "image/gif") return Promise.resolve(file);
 
     return new Promise(function (resolve) {
-      var url = URL.createObjectURL(file);
+      // 축소는 어디까지나 편의 기능이다. 어떤 이유로든 실패하거나 응답이 없으면
+      // 원본을 그대로 첨부해야 한다. 여기서 멈추면 첨부 자체가 안 되기 때문이다.
+      var settled = false;
+      var url = null;
+      var timer = null;
+
+      function done(result) {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (url) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch (e) {
+            /* 이미 해제됨 */
+          }
+        }
+        resolve(result || file);
+      }
+
+      // HEIC 처럼 WebView 가 디코딩하지 못하는 형식은 onload/onerror 가 모두
+      // 오지 않는 기기가 있다. 그럴 때도 첨부가 진행되도록 시간 제한을 둔다.
+      timer = setTimeout(function () {
+        done(file);
+      }, SHRINK_TIMEOUT);
+
+      try {
+        url = URL.createObjectURL(file);
+      } catch (e) {
+        done(file);
+        return;
+      }
+
       var img = new Image();
 
       img.onload = function () {
-        var longSide = Math.max(img.width, img.height);
-        if (longSide <= IMAGE_MAX_DIMENSION) {
-          URL.revokeObjectURL(url);
-          resolve(file);
-          return;
+        try {
+          var longSide = Math.max(img.width, img.height);
+          if (!longSide || longSide <= IMAGE_MAX_DIMENSION) {
+            done(file);
+            return;
+          }
+
+          var scale = IMAGE_MAX_DIMENSION / longSide;
+          var canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+
+          var ctx = canvas.getContext("2d");
+          if (!ctx) {
+            done(file);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+          if (!canvas.toBlob) {
+            done(file);
+            return;
+          }
+
+          canvas.toBlob(
+            function (blob) {
+              // 축소 결과가 더 크거나 비어 있으면(드물지만) 원본을 쓴다.
+              done(blob && blob.size > 0 && blob.size < file.size ? blob : file);
+            },
+            "image/jpeg",
+            IMAGE_QUALITY
+          );
+        } catch (e) {
+          done(file);
         }
-
-        var scale = IMAGE_MAX_DIMENSION / longSide;
-        var canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-
-        var ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-        canvas.toBlob(
-          function (blob) {
-            URL.revokeObjectURL(url);
-            // 축소 결과가 더 크면(드물지만) 원본을 쓴다.
-            resolve(blob && blob.size < file.size ? blob : file);
-          },
-          "image/jpeg",
-          IMAGE_QUALITY
-        );
       };
 
       img.onerror = function () {
-        URL.revokeObjectURL(url);
-        resolve(file); // 축소 실패해도 전송은 가능해야 한다
+        done(file); // 축소 실패해도 전송은 가능해야 한다
       };
 
       img.src = url;

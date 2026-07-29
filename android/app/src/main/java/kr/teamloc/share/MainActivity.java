@@ -35,6 +35,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 
 /**
  * 웹 화면을 담는 껍데기.
@@ -56,6 +57,10 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
+
+    // 즉석 촬영 결과를 받을 임시 파일. 카메라 앱은 결과 Intent 가 아니라 이 파일에 쓴다.
+    private File captureFile;
+    private Uri captureUri;
 
     // 웹이 조각으로 넘기는 파일을 받아 쓰는 중인 대상.
     private OutputStream pendingOut;
@@ -84,8 +89,14 @@ public class MainActivity extends AppCompatActivity {
         settings.setDomStorageEnabled(true); // localStorage / IndexedDB
         settings.setGeolocationEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
+        // 파일 첨부(input type=file)로 고른 사진·동영상을 WebView 가 읽을 수 있어야 한다.
+        // 갤러리에 따라 content:// 가 아니라 file:// 를 돌려주는 기기가 있어서, 둘을 막아 두면
+        // 파일이 0바이트로 넘어오거나 첨부가 조용히 실패한다.
+        // 페이지는 원격 https 라서 스킴이 달라 파일을 스스로 열 수는 없다.
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         webView.addJavascriptInterface(new Bridge(), "AndroidBridge");
@@ -131,21 +142,48 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
+            /**
+             * 메모 첨부용 파일 선택.
+             *
+             * 규칙이 하나 있다. 한 번 받은 callback 은 반드시 값을 돌려줘야 한다.
+             * 그냥 버리면 WebView 가 그 input 을 계속 "선택 중"으로 여겨서, 그다음부터는
+             * 첨부 버튼을 눌러도 아무 반응이 없다. 첨부가 안 되는 가장 흔한 원인이었다.
+             */
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
-                if (fileCallback != null) fileCallback.onReceiveValue(null);
+                if (fileCallback != null) {
+                    fileCallback.onReceiveValue(null);
+                    fileCallback = null;
+                }
+                discardCapture();
                 fileCallback = callback;
 
-                try {
-                    startActivityForResult(params.createIntent(), REQ_FILE_CHOOSER);
-                    return true;
-                } catch (Exception e) {
-                    fileCallback = null;
-                    Toast.makeText(MainActivity.this, R.string.file_chooser_failed,
-                            Toast.LENGTH_SHORT).show();
-                    return false;
+                boolean video = wantsVideo(params);
+                Intent content = buildContentIntent(params);
+                Intent capture = buildCaptureIntent(video);
+
+                // 갤러리 선택 + 즉석 촬영을 한 화면에 같이 띄운다.
+                Intent chooser = new Intent(Intent.ACTION_CHOOSER)
+                        .putExtra(Intent.EXTRA_INTENT, content)
+                        .putExtra(Intent.EXTRA_TITLE,
+                                getString(video ? R.string.pick_video : R.string.pick_photo));
+                if (capture != null) {
+                    chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{capture});
                 }
+
+                if (launchChooser(chooser)) return true;
+                // 기기에 따라 ACTION_CHOOSER 가 막히면 선택기를 직접 띄운다.
+                if (launchChooser(content)) return true;
+                if (launchChooser(openDocumentFallback(content))) return true;
+
+                // 하나도 열지 못했다. 반드시 결과를 돌려주고 끝낸다.
+                discardCapture();
+                fileCallback.onReceiveValue(null);
+                fileCallback = null;
+                Toast.makeText(MainActivity.this, R.string.file_chooser_failed,
+                        Toast.LENGTH_LONG).show();
+                return true;
             }
         });
 
@@ -241,12 +279,134 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---------- 파일 선택 ----------
+
+    /** 웹이 요청한 accept 이 동영상인지. 사진/동영상 버튼을 구분하는 데 쓴다. */
+    private static boolean wantsVideo(WebChromeClient.FileChooserParams params) {
+        String[] accepts = params == null ? null : params.getAcceptTypes();
+        if (accepts == null) return false;
+        for (String accept : accepts) {
+            if (accept == null) continue;
+            String value = accept.toLowerCase(java.util.Locale.US);
+            if (value.contains("video") || value.endsWith(".mp4") || value.endsWith(".mov")) return true;
+        }
+        return false;
+    }
+
+    /** 갤러리/파일 선택 인텐트. WebView 가 준 것을 쓰되 비어 있으면 채워 넣는다. */
+    private Intent buildContentIntent(WebChromeClient.FileChooserParams params) {
+        Intent intent = null;
+        try {
+            intent = params.createIntent();
+        } catch (Exception e) {
+            Log.w(TAG, "createIntent 실패", e);
+        }
+        if (intent == null) {
+            intent = new Intent(Intent.ACTION_GET_CONTENT);
+            if (params != null && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            }
+        }
+        if (intent.getType() == null || intent.getType().isEmpty()) {
+            intent.setType(wantsVideo(params) ? "video/*" : "image/*");
+        }
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        return intent;
+    }
+
+    /** 마지막 수단. 문서 선택기는 어느 기기에나 있다. */
+    private static Intent openDocumentFallback(Intent content) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(content.getType() == null ? "*/*" : content.getType());
+        if (content.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)) {
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        return intent;
+    }
+
+    /**
+     * 즉석 촬영 인텐트. 사진을 찍어 바로 첨부할 수 있게 선택 화면에 함께 올린다.
+     * 카메라 앱은 우리가 만든 파일에 결과를 쓰므로 FileProvider 로 주소를 내준다.
+     */
+    @Nullable
+    private Intent buildCaptureIntent(boolean video) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            return null;
+        }
+
+        try {
+            File dir = new File(getCacheDir(), "captures");
+            if (!dir.exists() && !dir.mkdirs()) return null;
+
+            File file = new File(dir,
+                    (video ? "video-" : "photo-") + System.currentTimeMillis() + (video ? ".mp4" : ".jpg"));
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+
+            Intent intent = new Intent(video ? MediaStore.ACTION_VIDEO_CAPTURE
+                    : MediaStore.ACTION_IMAGE_CAPTURE)
+                    .putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+
+            if (intent.resolveActivity(getPackageManager()) == null) return null;
+
+            captureFile = file;
+            captureUri = uri;
+            return intent;
+        } catch (Exception e) {
+            Log.w(TAG, "촬영 인텐트 준비 실패", e);
+            discardCapture();
+            return null;
+        }
+    }
+
+    private boolean launchChooser(Intent intent) {
+        if (intent == null) return false;
+        try {
+            startActivityForResult(intent, REQ_FILE_CHOOSER);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "선택 화면을 열 수 없음: " + intent.getAction(), e);
+            return false;
+        }
+    }
+
+    /** 쓰지 않은 촬영 파일을 지운다. 캐시에 빈 파일이 쌓이지 않게. */
+    private void discardCapture() {
+        if (captureFile != null && captureFile.exists() && !captureFile.delete()) {
+            Log.w(TAG, "촬영 임시 파일 삭제 실패");
+        }
+        captureFile = null;
+        captureUri = null;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         if (requestCode == REQ_FILE_CHOOSER) {
+            Uri[] result = null;
+
+            if (resultCode == RESULT_OK) {
+                boolean fromPicker = data != null && (data.getData() != null || data.getClipData() != null);
+                if (fromPicker) {
+                    result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                } else if (captureUri != null && captureFile != null && captureFile.length() > 0) {
+                    // 카메라로 찍은 경우다. 결과 Intent 가 비어 있고 파일에만 들어 있다.
+                    result = new Uri[]{captureUri};
+                }
+            }
+
+            if (result == null || result.length == 0) {
+                discardCapture();
+                result = null;
+            } else {
+                // 촬영 파일은 웹이 읽어간 뒤 다음 요청에서 정리한다.
+                captureFile = null;
+            }
+
             if (fileCallback != null) {
-                fileCallback.onReceiveValue(
-                        WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                fileCallback.onReceiveValue(result);
                 fileCallback = null;
             }
             return;
@@ -603,6 +763,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         // 저장 중에 화면이 사라지면 반쪽 파일이 남는다.
         closeQuietly(true);
+        discardCapture();
         if (webView != null) {
             webView.removeJavascriptInterface("AndroidBridge");
         }

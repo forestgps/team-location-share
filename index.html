@@ -229,12 +229,41 @@
         <label for="memo-text">메모 내용</label>
         <textarea id="memo-text" rows="4" maxlength="2000" placeholder="관측 내용, 특이사항 등"></textarea>
 
-        <label>첨부</label>
+        <span class="field-label">첨부</span>
         <div class="attach-row">
-          <button type="button" id="memo-photo-btn" class="ghost small">사진 첨부</button>
-          <button type="button" id="memo-video-btn" class="ghost small">동영상 첨부</button>
-          <input id="memo-photo-input" type="file" accept="image/*" multiple hidden />
-          <input id="memo-video-input" type="file" accept="video/*" multiple hidden />
+          <!--
+            버튼이 아니라 label 이다. label 을 누르면 브라우저가 직접 파일 선택 창을 연다.
+            자바스크립트로 input.click() 을 호출하는 방식은 일부 안드로이드 WebView 에서
+            아무 반응이 없어 첨부가 되지 않았다.
+          -->
+          <label id="memo-photo-btn" class="ghost small file-btn" for="memo-photo-input"
+                 role="button" tabindex="0">사진 첨부</label>
+          <label id="memo-video-btn" class="ghost small file-btn" for="memo-video-input"
+                 role="button" tabindex="0">동영상 첨부</label>
+          <!--
+            display:none 인 입력은 일부 안드로이드 WebView 에서 프로그램 클릭이 무시된다.
+            화면에서만 감추고(.sr-only) 실제로는 배치해 둔다.
+            accept 에 확장자를 함께 적는 이유: 갤러리가 HEIC 사진을 image/* 로 신고하지 않아
+            선택 목록에서 아예 빠지는 기기가 있다.
+          -->
+          <input
+            id="memo-photo-input"
+            class="sr-only"
+            type="file"
+            accept="image/*,.heic,.heif,.jpg,.jpeg,.png,.webp"
+            multiple
+            tabindex="-1"
+            aria-hidden="true"
+          />
+          <input
+            id="memo-video-input"
+            class="sr-only"
+            type="file"
+            accept="video/*,.mp4,.mov,.3gp,.mkv,.avi"
+            multiple
+            tabindex="-1"
+            aria-hidden="true"
+          />
         </div>
         <ul id="memo-attachments" class="attachments"></ul>
         <small class="help">
