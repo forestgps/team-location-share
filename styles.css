@@ -298,8 +298,20 @@ button {
   line-height: 1.6;
 }
 
-/* 지도 마커 */
+/* 지도 마커
+   네이버 지도 API 에는 툴팁이 없다. 그래서 대원 이름을 마커 옆에 항상 그려 둔다.
+   감싸개의 좌측 26px 이 좌표에 놓이는 원이고, 이름은 그 오른쪽으로 흐른다. */
+.pin-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  /* 이름표가 넘쳐도 원의 위치는 좌표에 고정되어야 한다 */
+  width: max-content;
+}
+
 .pin {
+  flex: 0 0 auto;
   display: grid;
   place-items: center;
   width: 26px;
@@ -312,11 +324,71 @@ button {
   font-weight: 800;
 }
 
-.leaflet-tooltip.pin-label {
-  background: var(--panel);
+.pin--me { box-shadow: 0 0 0 3px rgba(76, 154, 255, 0.9); }
+
+.pin-name {
+  padding: 2px 6px;
+  background: rgba(23, 26, 33, 0.88);
   border: 1px solid var(--line);
+  border-radius: 5px;
   color: var(--text);
   font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* 위치 갱신이 끊긴 대원 */
+.pin-wrap--stale { opacity: 0.45; }
+
+/* 저장된 임무의 시작·종료 지점 */
+.endpoint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  width: max-content;
+}
+
+.endpoint-dot {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 3px solid currentColor;
+  background: #0f1115;
+  box-sizing: border-box;
+}
+
+.endpoint-dot--filled { border-width: 2px; }
+
+.endpoint-label {
+  padding: 1px 5px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* 지도 스크립트를 못 받았을 때 지도 자리에 띄우는 안내 */
+.map-error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  max-width: 340px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid #4a2a2f;
+  border-radius: 12px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
 }
 
 .toast {
@@ -556,8 +628,10 @@ button {
   text-align: center;
 }
 
-#map.picking { cursor: crosshair; }
-#map.picking .leaflet-grab { cursor: crosshair; }
+/* 메모 위치를 고르는 동안에는 지도 전체가 십자 커서다.
+   네이버 지도는 타일과 오버레이에 각자 커서를 지정하므로 자식까지 덮어써야 한다. */
+#map.picking,
+#map.picking * { cursor: crosshair !important; }
 
 /* 메모 핀 */
 .memo-pin {

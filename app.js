@@ -430,13 +430,10 @@
   }
 
   function initMap() {
-    // 확대/축소 버튼은 왼쪽 아래로 옮긴다. 왼쪽 위는 메모 버튼 자리다.
-    state.map = L.map("map", { zoomControl: false }).setView([36.5, 127.9], 7);
-    L.control.zoom({ position: "bottomleft" }).addTo(state.map);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(state.map);
+    // 지도 스크립트를 못 받아도 나머지 기능은 살려 둔다. 여기서 멈추면 나가기도 못 누른다.
+    // 이때 RtlocMap 은 무동작 객체를 돌려주므로 아래 지도 호출은 조용히 흘러간다.
+    state.map = RtlocMap.createMap("map", { center: [36.5, 127.9], zoom: 7 });
+    if (!RtlocMap.isReady()) showMapLoadError();
 
     state.map.on("dragstart", function () {
       if (state.follow) setFollow(false);
@@ -519,14 +516,15 @@
     document.getElementById("map").classList.toggle("picking", on);
   }
 
-  function onMapClick(event) {
+  /** @param {{lat: number, lng: number}} point 어댑터가 지도 좌표를 숫자로 넘겨준다 */
+  function onMapClick(point) {
     if (!state.memoMode) return;
     setMemoMode(false);
     openMemoEditor({
       id: RtlocMemo.newId(),
       teamKey: state.topic,
-      lat: event.latlng.lat,
-      lng: event.latlng.lng,
+      lat: point.lat,
+      lng: point.lng,
       text: "",
       createdAt: Date.now(),
       author: state.callsign,
@@ -949,25 +947,23 @@
     var existing = state.memos[memo.id];
     if (existing) {
       existing.memo = memo;
-      existing.marker.setLatLng([memo.lat, memo.lng]);
+      existing.marker.setPosition([memo.lat, memo.lng]);
       return;
     }
 
-    var marker = L.marker([memo.lat, memo.lng], {
-      icon: L.divIcon({
-        className: "",
-        html:
-          '<div class="memo-pin' +
-          (memo.remote ? " memo-pin--remote" : "") +
-          '"><span>메모</span></div>',
-        iconSize: [42, 34],
-        iconAnchor: [21, 34]
-      }),
-      zIndexOffset: 500
+    var marker = RtlocMap.marker({
+      position: [memo.lat, memo.lng],
+      html:
+        '<div class="memo-pin' +
+        (memo.remote ? " memo-pin--remote" : "") +
+        '"><span>메모</span></div>',
+      size: [42, 34],
+      anchor: [21, 34],
+      zIndex: 500
     });
 
     marker.addTo(state.map);
-    marker.on("click", function () {
+    marker.onClick(function () {
       openMemoDetail(memo.id);
     });
 
@@ -977,7 +973,7 @@
   function removeMemoMarker(id) {
     var entry = state.memos[id];
     if (!entry) return;
-    state.map.removeLayer(entry.marker);
+    entry.marker.remove();
     delete state.memos[id];
   }
 
@@ -2252,7 +2248,7 @@
 
   function clearHistoryLayer() {
     if (!state.historyLayer) return;
-    state.map.removeLayer(state.historyLayer);
+    state.historyLayer.remove();
     state.historyLayer = null;
   }
 
@@ -2260,7 +2256,7 @@
   function showMissionOnMap(mission) {
     clearHistoryLayer();
 
-    var layer = L.layerGroup();
+    var layer = RtlocMap.group();
     mission.tracks.forEach(function (track, index) {
       if (track.points.length < 1) return;
       var color = track.color || PALETTE[index % PALETTE.length];
@@ -2268,19 +2264,11 @@
         return [p[0], p[1]];
       });
 
-      L.polyline(latlngs, { color: color, weight: 4, opacity: 0.9, dashArray: "1 0" }).addTo(layer);
+      RtlocMap.polyline({ path: latlngs, color: color, weight: 4, opacity: 0.9 }).addTo(layer);
 
-      L.circleMarker(latlngs[0], {
-        radius: 5, color: color, fillColor: "#0f1115", fillOpacity: 1, weight: 3
-      })
-        .bindTooltip(track.name + " 시작", { className: "pin-label" })
-        .addTo(layer);
-
-      L.circleMarker(latlngs[latlngs.length - 1], {
-        radius: 6, color: color, fillColor: color, fillOpacity: 1, weight: 2
-      })
-        .bindTooltip(track.name + " 종료", { className: "pin-label" })
-        .addTo(layer);
+      // 시작·종료 지점. 툴팁이 없는 API 라서 이름을 점 옆에 직접 그린다.
+      endpointMarker(latlngs[0], color, track.name + " 시작", false).addTo(layer);
+      endpointMarker(latlngs[latlngs.length - 1], color, track.name + " 종료", true).addTo(layer);
     });
 
     layer.addTo(state.map);
@@ -2289,9 +2277,48 @@
     var bounds = RtlocMission.boundsOf(mission);
     if (bounds) {
       setFollow(false);
-      state.map.fitBounds(bounds, { padding: [40, 40] });
+      state.map.fitBounds(bounds, 40);
     }
     toast("'" + (mission.name || "임무") + "' 경로를 지도에 표시했습니다. 임무를 시작하면 사라집니다.", 5000);
+  }
+
+  /**
+   * 저장된 임무의 시작/종료 지점 표식.
+   * @param {number[]} pair [위도, 경도]
+   * @param {string} color 대원 색
+   * @param {string} label 점 옆에 붙일 글자
+   * @param {boolean} filled 종료 지점은 색을 채워 구분한다
+   */
+  function endpointMarker(pair, color, label, filled) {
+    return RtlocMap.marker({
+      position: pair,
+      html:
+        '<div class="endpoint">' +
+        '<span class="endpoint-dot' +
+        (filled ? " endpoint-dot--filled" : "") +
+        '" style="border-color:' +
+        color +
+        (filled ? ";background:" + color : "") +
+        '"></span>' +
+        '<span class="endpoint-label">' +
+        escapeHtml(label) +
+        "</span></div>",
+      anchor: [7, 7],
+      zIndex: 400
+    });
+  }
+
+  /** 지도 스크립트를 못 받았을 때. 원인이 대개 도메인 등록이라 그걸 짚어 준다. */
+  function showMapLoadError() {
+    var box = document.createElement("div");
+    box.className = "map-error";
+    box.innerHTML =
+      "<strong>지도를 불러오지 못했습니다.</strong>" +
+      "<span>네이버 지도 API 키에 이 사이트 주소가 등록되어 있는지 확인해 주세요. " +
+      "네트워크가 막힌 경우에도 이 안내가 나옵니다. 지도 외의 기능은 그대로 쓸 수 있습니다.</span>";
+    var container = document.getElementById("map");
+    if (container) container.appendChild(box);
+    toast("지도를 불러오지 못했습니다. 메시지와 메모 목록은 계속 쓸 수 있습니다.", 8000);
   }
 
   function setFollow(on) {
@@ -2945,9 +2972,9 @@
     });
 
     changed.forEach(function (member) {
-      member.marker.setIcon(makeIcon(member.name, member.color, member.isMe));
-      member.circle.setStyle({ color: member.color });
-      if (member.trail) member.trail.setStyle({ color: member.color });
+      member.marker.setHtml(makeIcon(member));
+      member.circle.setColor(member.color);
+      if (member.trail) member.trail.setColor(member.color);
     });
 
     return changed.length > 0;
@@ -2963,20 +2990,25 @@
         id: data.id,
         color: RtlocPalette.preferredColor(data.id),
         trail: null,
-        marker: L.marker([data.lat, data.lng]),
-        circle: L.circle([data.lat, data.lng], {
-          radius: data.accuracy || 0,
-          weight: 1,
-          fillOpacity: 0.08
-        })
+        stale: false,
+        marker: null,
+        circle: null
       };
+      member.circle = RtlocMap.circle({
+        center: [data.lat, data.lng],
+        radius: data.accuracy || 0,
+        color: member.color
+      });
+      // 이름은 마커 안에 함께 그린다. 네이버 API 에는 툴팁이 없고,
+      // 휴대폰에는 호버가 없어서 툴팁은 원래도 보이지 않았다.
+      member.marker = RtlocMap.marker({
+        position: [data.lat, data.lng],
+        html: makeIcon({ name: data.name, color: member.color, isMe: data.isMe, stale: false }),
+        anchor: [13, 13],
+        zIndex: data.isMe ? 300 : 200
+      });
       member.circle.addTo(state.map);
       member.marker.addTo(state.map);
-      member.marker.bindTooltip(data.name, {
-        className: "pin-label",
-        direction: "top",
-        offset: [0, -14]
-      });
       if (!data.isMe) toast(data.name + " 님이 팀 채널에 나타났습니다.");
     }
 
@@ -2992,17 +3024,19 @@
       isMe: !!data.isMe
     });
 
-    member.marker.setLatLng([data.lat, data.lng]);
-    member.circle.setLatLng([data.lat, data.lng]);
+    member.marker.setPosition([data.lat, data.lng]);
+    member.circle.setCenter([data.lat, data.lng]);
     member.circle.setRadius(data.accuracy || 0);
-    member.marker.setOpacity(1);
+
+    // 위치가 갱신되면 다시 또렷하게 보인다.
+    var wasStale = member.stale;
+    member.stale = false;
 
     // 새 대원이 들어오면 팀 전체 색을 다시 배분한다(중복 방지).
     var recolored = isNew ? assignColors() : false;
-    if (nameChanged || (isNew && !recolored)) {
-      member.marker.setIcon(makeIcon(member.name, member.color, member.isMe));
-      member.circle.setStyle({ color: member.color });
-      member.marker.setTooltipContent(member.name);
+    if (nameChanged || wasStale || (isNew && !recolored)) {
+      member.marker.setHtml(makeIcon(member));
+      member.circle.setColor(member.color);
     }
 
     // 임무 중이면 이동 경로를 기록하고 선을 늘린다.
@@ -3029,41 +3063,50 @@
     });
 
     if (!member.trail) {
-      member.trail = L.polyline(latlngs, {
+      member.trail = RtlocMap.polyline({
+        path: latlngs,
         color: member.color,
         weight: 4,
         opacity: 0.85
       }).addTo(state.map);
-      member.trail.bindTooltip(member.name + " 이동 경로", { className: "pin-label", sticky: true });
     } else {
-      member.trail.setLatLngs(latlngs);
+      member.trail.setPath(latlngs);
     }
   }
 
   function removeMember(id) {
     var member = state.members[id];
     if (!member) return;
-    state.map.removeLayer(member.marker);
-    state.map.removeLayer(member.circle);
+    member.marker.remove();
+    member.circle.remove();
     // 경로선은 남겨 둔다. 임무 중 이탈한 대원의 이동 흔적도 기록의 일부다.
     delete state.members[id];
     toast(member.name + " 님이 나갔습니다.");
   }
 
-  function makeIcon(name, color, isMe) {
+  /**
+   * 대원 마커의 HTML. 색 원 안에 이름 첫 글자, 그 옆에 전체 이름을 붙인다.
+   * @param {{name: string, color: string, isMe: boolean, stale: boolean}} member
+   */
+  function makeIcon(member) {
+    var name = String(member.name || "");
     var initial = escapeHtml(name.trim().charAt(0) || "?");
-    return L.divIcon({
-      className: "",
-      html:
-        '<div class="pin" style="background:' +
-        color +
-        (isMe ? ";box-shadow:0 0 0 3px rgba(76,154,255,.9)" : "") +
-        '">' +
-        initial +
-        "</div>",
-      iconSize: [26, 26],
-      iconAnchor: [13, 13]
-    });
+    return (
+      '<div class="pin-wrap' +
+      (member.stale ? " pin-wrap--stale" : "") +
+      '">' +
+      '<span class="pin' +
+      (member.isMe ? " pin--me" : "") +
+      '" style="background:' +
+      member.color +
+      '">' +
+      initial +
+      "</span>" +
+      '<span class="pin-name">' +
+      escapeHtml(name) +
+      "</span>" +
+      "</div>"
+    );
   }
 
   function sweep() {
@@ -3074,8 +3117,10 @@
       var age = now - member.updatedAt;
       if (age > DROP_AFTER) {
         removeMember(id);
-      } else if (age > STALE_AFTER) {
-        member.marker.setOpacity(0.5);
+      } else if (age > STALE_AFTER && !member.stale) {
+        // 마커에 setOpacity 가 없다. 아이콘을 다시 그려 흐리게 만든다.
+        member.stale = true;
+        member.marker.setHtml(makeIcon(member));
       }
     });
     renderMembers();
@@ -3120,7 +3165,6 @@
       btn.addEventListener("click", function () {
         setFollow(false);
         state.map.setView([member.lat, member.lng], Math.max(state.map.getZoom(), 16));
-        member.marker.openTooltip();
       });
 
       li.appendChild(btn);

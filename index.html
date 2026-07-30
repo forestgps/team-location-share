@@ -14,7 +14,6 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="팀 위치" />
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -358,7 +357,14 @@
     </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!--
+    네이버 지도 JS API v3.
+    ncpKeyId 는 Client ID 이고 공개되어도 되는 값이다. 브라우저에 반드시 노출되기 때문에
+    네이버는 키를 감추는 방식이 아니라 "등록된 도메인에서만 동작"으로 보호한다.
+    그래서 네이버 클라우드 플랫폼 콘솔의 Web 서비스 URL 에 이 사이트 주소를 등록해야 한다.
+    Client Secret 은 서버용이므로 이 파일에 절대 넣지 않는다.
+  -->
+  <script src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=l7sgvsemhb"></script>
   <script src="https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"></script>
   <script src="crypto-team.js"></script>
   <script src="palette.js"></script>
@@ -369,6 +375,7 @@
   <script src="memo.js"></script>
   <script src="mission.js"></script>
   <script src="route-video.js"></script>
+  <script src="naver-map.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -8,7 +8,7 @@
  *  - 앱 셸(HTML/CSS/JS): 네트워크 우선, 실패 시 캐시. 배포 직후 최신 코드를 받게 한다.
  *  - 지도 타일: 캐시하지 않는다(용량이 크고 변동이 많다).
  */
-var CACHE = "rtloc-shell-v13";
+var CACHE = "rtloc-shell-v14";
 
 var SHELL = [
   "./",
@@ -23,12 +23,13 @@ var SHELL = [
   "memo.js",
   "mission.js",
   "route-video.js",
+  "naver-map.js",
   "app.js",
   "manifest.json",
   "icons/icon.svg",
-  "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
-  "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
   "https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"
+  // 네이버 지도 스크립트는 캐시하지 않는다. 로더가 실행 시점에 다른 리소스를 더
+  // 받아오고 키가 URL 에 들어 있어서, 캐시해 두면 갱신과 인증이 어긋난다.
 ];
 
 self.addEventListener("install", function (event) {
@@ -69,8 +70,13 @@ self.addEventListener("fetch", function (event) {
 
   var url = new URL(request.url);
 
-  // 지도 타일은 캐시 대상이 아니다.
+  // 지도 타일은 캐시 대상이 아니다. 용량이 크고 변동이 많다.
+  // OSM 은 임무 영상 배경에 계속 쓰이고, 네이버는 화면 지도에 쓰인다.
   if (/tile\.openstreetmap\.org$/.test(url.hostname)) return;
+
+  // 네이버 지도는 스크립트·타일·글꼴을 여러 도메인에서 받아온다.
+  // 캐시가 끼면 키 인증과 갱신이 어긋나므로 전부 그대로 통과시킨다.
+  if (/(^|\.)(map\.naver\.com|naver\.net|pstatic\.net|ntruss\.com)$/.test(url.hostname)) return;
 
   // 실시간 연결은 건드리지 않는다.
   if (url.protocol === "ws:" || url.protocol === "wss:") return;
