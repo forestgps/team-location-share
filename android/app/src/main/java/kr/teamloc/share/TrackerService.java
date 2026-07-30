@@ -305,6 +305,19 @@ public class TrackerService extends Service {
         if (!force && now - lastPublishedAt < LOCATION_MIN_INTERVAL_MS) return;
         lastPublishedAt = now;
 
+        // 고도. hasAltitude() 가 false 면 getAltitude() 는 0.0 을 돌려주므로
+        // 확인 없이 보내면 해수면 높이로 잘못 표시된다. 없을 때는 null 로 보낸다.
+        String alt = lastLocation.hasAltitude()
+                ? String.valueOf(Math.round(lastLocation.getAltitude()))
+                : "null";
+
+        // 수직 정확도는 안드로이드 8(API 26) 부터 제공된다.
+        String altAcc = "null";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && lastLocation.hasVerticalAccuracy()) {
+            altAcc = String.valueOf(Math.round(lastLocation.getVerticalAccuracyMeters()));
+        }
+
         String json = "{"
                 + "\"type\":\"pos\","
                 + "\"id\":\"" + escape(clientId) + "\","
@@ -312,6 +325,8 @@ public class TrackerService extends Service {
                 + "\"lat\":" + round6(lastLocation.getLatitude()) + ","
                 + "\"lng\":" + round6(lastLocation.getLongitude()) + ","
                 + "\"acc\":" + Math.round(lastLocation.getAccuracy()) + ","
+                + "\"alt\":" + alt + ","
+                + "\"altAcc\":" + altAcc + ","
                 + "\"bg\":true,"
                 + "\"ts\":" + now
                 + "}";

@@ -166,6 +166,13 @@
           <button type="button" id="memo-list-btn" class="overlay-btn subtle">
             메모 목록 <span id="memo-count" class="count">0</span>
           </button>
+
+          <div id="maptype-group" class="maptype-group" role="group" aria-label="지도 유형">
+            <button type="button" class="maptype-btn" data-maptype="normal" aria-pressed="true">일반</button>
+            <button type="button" class="maptype-btn" data-maptype="terrain" aria-pressed="false">지형</button>
+            <button type="button" class="maptype-btn" data-maptype="contour" aria-pressed="false">등고선</button>
+            <button type="button" class="maptype-btn" data-maptype="satellite" aria-pressed="false">위성</button>
+          </div>
         </div>
 
         <p id="memo-hint" class="map-hint" hidden>

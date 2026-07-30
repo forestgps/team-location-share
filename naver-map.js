@@ -49,6 +49,9 @@
       getZoom: function () { return 7; },
       fitBounds: function () { return self; },
       remove: function () { return self; },
+      mapTypes: function () { return []; },
+      setMapType: function () { return "normal"; },
+      getMapType: function () { return "normal"; },
       setPosition: function () { return self; },
       setHtml: function () { return self; },
       onClick: function () { return self; },
@@ -235,6 +238,38 @@
    * @param {string} containerId 지도를 넣을 요소 id
    * @param {{center: number[], zoom: number}} opts
    */
+  /**
+   * 등고선 지도 유형.
+   *
+   * 네이버 지형도(TERRAIN)는 음영기복과 봉우리 표고점만 있고 등고선이 없다.
+   * 타일을 직접 받아 확인했다. 그래서 등고선이 필요할 때는 OpenTopoMap 을 쓴다.
+   * 좌상단 기준 표준 XYZ 이고 EPSG3857 이라 네이버 투영과 그대로 맞는다.
+   *
+   * OpenTopoMap 은 무료 공개 타일이므로 저작자 표시가 이용 조건이다.
+   * provider 로 넘기면 네이버가 지도 아래에 표시해 준다.
+   */
+  function contourMapType() {
+    var m = api();
+    return new m.ImageMapType({
+      name: "등고선",
+      minZoom: 5,
+      maxZoom: 17, // OpenTopoMap 이 제공하는 상한
+      projection: m.EPSG3857,
+      tileSize: new m.Size(256, 256),
+      vendor: "OpenTopoMap",
+      provider: [
+        { title: "© OpenTopoMap (CC-BY-SA)", link: "https://opentopomap.org/" },
+        { title: "/OpenStreetMap", link: "https://www.openstreetmap.org/copyright" }
+      ],
+      // 서버 세 곳을 번갈아 써서 한 곳에 부담이 몰리지 않게 한다.
+      tileSet: [
+        "https://a.tile.opentopomap.org/{z}/{x}/{y}.png",
+        "https://b.tile.opentopomap.org/{z}/{x}/{y}.png",
+        "https://c.tile.opentopomap.org/{z}/{x}/{y}.png"
+      ]
+    });
+  }
+
   function createMap(containerId, opts) {
     if (!isReady()) return noop();
     var m = api();
@@ -253,9 +288,43 @@
       scaleControl: true
     });
 
+    // 등고선 유형을 등록해 둔다. 네이버 기본 유형들은 이미 들어 있다.
+    var contourReady = false;
+    try {
+      raw.mapTypes.set("contour", contourMapType());
+      contourReady = true;
+    } catch (e) {
+      // 등록 실패해도 나머지 유형은 그대로 쓴다.
+    }
+
     var wrapper = {
       raw: function () {
         return raw;
+      },
+
+      /** 이 기기에서 고를 수 있는 지도 유형 id 목록. */
+      mapTypes: function () {
+        var ids = ["normal", "terrain", "satellite"];
+        if (contourReady) ids.splice(2, 0, "contour");
+        return ids;
+      },
+
+      /**
+       * @param {string} id "normal" | "terrain" | "contour" | "satellite"
+       * @returns {string} 실제로 적용된 유형 id
+       */
+      setMapType: function (id) {
+        if (id === "contour" && !contourReady) id = "terrain";
+        try {
+          raw.setMapTypeId(id);
+        } catch (e) {
+          raw.setMapTypeId("normal");
+        }
+        return raw.getMapTypeId();
+      },
+
+      getMapType: function () {
+        return raw.getMapTypeId();
       },
 
       /**

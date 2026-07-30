@@ -25,6 +25,7 @@
   var STORAGE_KEY = "rtloc.profile.v2";
   // 파일 선택 중 앱이 다시 시작되면 되살릴 메모 초안(세션 한정)
   var MEMO_DRAFT_KEY = "rtloc.memoDraft.v1";
+  var MAPTYPE_KEY = "rtloc.mapType.v1";
 
   // 브로커 보관함(retained 메시지)에 올린 첨부 목록. 켤 때마다 다시 올리지 않기 위함이다.
   var VAULT_KEY = "rtloc.vault.v1";
@@ -434,6 +435,8 @@
     // 이때 RtlocMap 은 무동작 객체를 돌려주므로 아래 지도 호출은 조용히 흘러간다.
     state.map = RtlocMap.createMap("map", { center: [36.5, 127.9], zoom: 7 });
     if (!RtlocMap.isReady()) showMapLoadError();
+
+    setupMapTypes();
 
     state.map.on("dragstart", function () {
       if (state.follow) setFollow(false);
@@ -2308,6 +2311,62 @@
     });
   }
 
+  // ---------- 지도 유형 ----------
+
+  /**
+   * 일반 / 지형 / 등고선 / 위성 전환 버튼을 붙인다.
+   *
+   * 등고선은 네이버가 제공하지 않아 OpenTopoMap 을 쓴다(naver-map.js 참고).
+   * 고른 유형은 기기에 기억해 다음 접속에도 유지한다.
+   */
+  function setupMapTypes() {
+    var available = state.map.mapTypes();
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".maptype-btn"));
+
+    buttons.forEach(function (btn) {
+      var id = btn.getAttribute("data-maptype");
+
+      // 이 기기에서 쓸 수 없는 유형은 버튼을 감춘다.
+      if (available.indexOf(id) === -1) {
+        btn.hidden = true;
+        return;
+      }
+
+      btn.addEventListener("click", function () {
+        applyMapType(id, true);
+      });
+    });
+
+    var saved = null;
+    try {
+      saved = localStorage.getItem(MAPTYPE_KEY);
+    } catch (e) {
+      /* 저장소를 못 쓰는 기기 */
+    }
+    applyMapType(available.indexOf(saved) >= 0 ? saved : "normal", false);
+  }
+
+  function applyMapType(id, remember) {
+    var applied = state.map.setMapType(id);
+
+    document.querySelectorAll(".maptype-btn").forEach(function (btn) {
+      var on = btn.getAttribute("data-maptype") === applied;
+      btn.setAttribute("aria-pressed", String(on));
+      btn.classList.toggle("active", on);
+    });
+
+    if (remember) {
+      try {
+        localStorage.setItem(MAPTYPE_KEY, applied);
+      } catch (e) {
+        /* 저장 못해도 이번 세션에는 적용된다 */
+      }
+      if (applied === "contour") {
+        toast("등고선 지도로 바꿨습니다. 확대는 17단계까지 됩니다.", 5000);
+      }
+    }
+  }
+
   /** 지도 스크립트를 못 받았을 때. 원인이 대개 도메인 등록이라 그걸 짚어 준다. */
   function showMapLoadError() {
     var box = document.createElement("div");
@@ -2882,6 +2941,8 @@
         accuracy: isFiniteNumber(msg.acc) ? msg.acc : null,
         heading: isFiniteNumber(msg.hdg) ? msg.hdg : null,
         speed: isFiniteNumber(msg.spd) ? msg.spd : null,
+        altitude: isFiniteNumber(msg.alt) ? msg.alt : null,
+        altitudeAccuracy: isFiniteNumber(msg.altAcc) ? msg.altAcc : null,
         updatedAt: Date.now()
       });
       renderMembers();
@@ -2897,7 +2958,10 @@
           lng: position.coords.longitude,
           accuracy: position.coords.accuracy,
           heading: position.coords.heading,
-          speed: position.coords.speed
+          speed: position.coords.speed,
+          // 고도는 GPS 가 잡혀야 나온다. 실내나 와이파이 측위에서는 null 이다.
+          altitude: position.coords.altitude,
+          altitudeAccuracy: position.coords.altitudeAccuracy
         };
 
         upsertMember({
@@ -2908,6 +2972,8 @@
           accuracy: state.lastPosition.accuracy,
           heading: state.lastPosition.heading,
           speed: state.lastPosition.speed,
+          altitude: state.lastPosition.altitude,
+          altitudeAccuracy: state.lastPosition.altitudeAccuracy,
           updatedAt: Date.now(),
           isMe: true
         });
@@ -2947,6 +3013,11 @@
       acc: state.lastPosition.accuracy != null ? Math.round(state.lastPosition.accuracy) : null,
       hdg: isFiniteNumber(state.lastPosition.heading) ? Math.round(state.lastPosition.heading) : null,
       spd: isFiniteNumber(state.lastPosition.speed) ? state.lastPosition.speed : null,
+      // 고도(m). GPS 가 안 잡히면 null 로 나가고 받는 쪽은 표시를 생략한다.
+      alt: isFiniteNumber(state.lastPosition.altitude) ? Math.round(state.lastPosition.altitude) : null,
+      altAcc: isFiniteNumber(state.lastPosition.altitudeAccuracy)
+        ? Math.round(state.lastPosition.altitudeAccuracy)
+        : null,
       ts: now
     });
   }
@@ -2991,6 +3062,8 @@
         color: RtlocPalette.preferredColor(data.id),
         trail: null,
         stale: false,
+        altitude: null,
+        altitudeAccuracy: null,
         marker: null,
         circle: null
       };
@@ -3003,7 +3076,13 @@
       // 휴대폰에는 호버가 없어서 툴팁은 원래도 보이지 않았다.
       member.marker = RtlocMap.marker({
         position: [data.lat, data.lng],
-        html: makeIcon({ name: data.name, color: member.color, isMe: data.isMe, stale: false }),
+        html: makeIcon({
+          name: data.name,
+          color: member.color,
+          isMe: data.isMe,
+          stale: false,
+          altitude: data.altitude
+        }),
         anchor: [13, 13],
         zIndex: data.isMe ? 300 : 200
       });
@@ -3013,6 +3092,7 @@
     }
 
     var nameChanged = member.name !== data.name;
+    var altChanged = displayAltitude(member.altitude) !== displayAltitude(data.altitude);
     Object.assign(member, {
       name: data.name,
       lat: data.lat,
@@ -3020,6 +3100,8 @@
       accuracy: data.accuracy,
       heading: data.heading,
       speed: data.speed,
+      altitude: data.altitude == null ? null : data.altitude,
+      altitudeAccuracy: data.altitudeAccuracy == null ? null : data.altitudeAccuracy,
       updatedAt: data.updatedAt,
       isMe: !!data.isMe
     });
@@ -3034,7 +3116,8 @@
 
     // 새 대원이 들어오면 팀 전체 색을 다시 배분한다(중복 방지).
     var recolored = isNew ? assignColors() : false;
-    if (nameChanged || wasStale || (isNew && !recolored)) {
+    // 고도가 바뀌면 이름표 위 숫자도 같이 갱신해야 한다.
+    if (nameChanged || altChanged || wasStale || (isNew && !recolored)) {
       member.marker.setHtml(makeIcon(member));
       member.circle.setColor(member.color);
     }
@@ -3085,12 +3168,27 @@
   }
 
   /**
-   * 대원 마커의 HTML. 색 원 안에 이름 첫 글자, 그 옆에 전체 이름을 붙인다.
-   * @param {{name: string, color: string, isMe: boolean, stale: boolean}} member
+   * 표시용 고도 문자열. 값이 없으면 null.
+   *
+   * 기기가 주는 값은 WGS84 타원체 기준이라 해수면 기준 표고와 다르다.
+   * 한반도에서는 대략 20~25m 정도 높게 나온다. 대원끼리의 상대 고도차나
+   * 오르내림 추세를 보는 데는 문제가 없지만, 지도의 표고와는 차이가 난다.
+   */
+  function displayAltitude(altitude) {
+    if (!isFiniteNumber(altitude)) return null;
+    return Math.round(altitude) + "m";
+  }
+
+  /**
+   * 대원 마커의 HTML.
+   * 색 원 안에 이름 첫 글자, 오른쪽에 고도(위)와 이름(아래)을 쌓는다.
+   * @param {{name: string, color: string, isMe: boolean, stale: boolean, altitude: number}} member
    */
   function makeIcon(member) {
     var name = String(member.name || "");
     var initial = escapeHtml(name.trim().charAt(0) || "?");
+    var alt = displayAltitude(member.altitude);
+
     return (
       '<div class="pin-wrap' +
       (member.stale ? " pin-wrap--stale" : "") +
@@ -3102,8 +3200,11 @@
       '">' +
       initial +
       "</span>" +
+      '<span class="pin-labels">' +
+      (alt ? '<span class="pin-alt">' + escapeHtml(alt) + "</span>" : "") +
       '<span class="pin-name">' +
       escapeHtml(name) +
+      "</span>" +
       "</span>" +
       "</div>"
     );
@@ -3175,6 +3276,16 @@
   function metaText(member, now) {
     var parts = [];
     parts.push(member.lat.toFixed(5) + ", " + member.lng.toFixed(5));
+    var alt = displayAltitude(member.altitude);
+    if (alt) {
+      parts.push(
+        "고도 " +
+          alt +
+          (isFiniteNumber(member.altitudeAccuracy)
+            ? " ±" + Math.round(member.altitudeAccuracy) + "m"
+            : "")
+      );
+    }
     if (member.accuracy != null) parts.push("정확도 ±" + Math.round(member.accuracy) + "m");
     if (!member.isMe && state.lastPosition) {
       parts.push("거리 " + formatDistance(distanceMeters(state.lastPosition, member)));

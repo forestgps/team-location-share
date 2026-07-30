@@ -326,6 +326,14 @@ button {
 
 .pin--me { box-shadow: 0 0 0 3px rgba(76, 154, 255, 0.9); }
 
+/* 고도는 이름 위에 쌓는다 */
+.pin-labels {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
 .pin-name {
   padding: 2px 6px;
   background: rgba(23, 26, 33, 0.88);
@@ -335,6 +343,18 @@ button {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.pin-alt {
+  padding: 1px 5px;
+  background: rgba(15, 17, 21, 0.9);
+  border: 1px solid #2d4a3c;
+  border-radius: 4px;
+  color: var(--ok);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 위치 갱신이 끊긴 대원 */
@@ -981,3 +1001,35 @@ textarea:focus-visible {
 }
 
 .video-manual a:hover { background: var(--panel-2); }
+
+/* 지도 유형 전환 (일반 / 지형 / 등고선 / 위성) */
+.maptype-group {
+  display: flex;
+  overflow: hidden;
+  background: rgba(23, 26, 33, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.maptype-btn {
+  padding: 6px 9px;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.maptype-btn:first-child { border-left: 0; }
+.maptype-btn:hover { color: var(--text); background: var(--panel-2); }
+
+.maptype-btn.active {
+  background: var(--accent);
+  border-left-color: var(--accent);
+  color: #06101f;
+}
+
+.maptype-btn[hidden] { display: none; }
