@@ -3081,7 +3081,10 @@
           color: member.color,
           isMe: data.isMe,
           stale: false,
-          altitude: data.altitude
+          altitude: data.altitude,
+          // 지오이드 보정에 좌표가 필요하다
+          lat: data.lat,
+          lng: data.lng
         }),
         anchor: [13, 13],
         zIndex: data.isMe ? 300 : 200
@@ -3092,7 +3095,9 @@
     }
 
     var nameChanged = member.name !== data.name;
-    var altChanged = displayAltitude(member.altitude) !== displayAltitude(data.altitude);
+    // 표시되는 숫자가 바뀔 때만 마커를 다시 그린다.
+    // 위치가 움직이면 지오이드 보정값도 달라지므로 좌표까지 같이 넘긴다.
+    var altChanged = displayAltitude(member) !== displayAltitude(data);
     Object.assign(member, {
       name: data.name,
       lat: data.lat,
@@ -3168,15 +3173,32 @@
   }
 
   /**
-   * 표시용 고도 문자열. 값이 없으면 null.
+   * 화면에 쓸 고도를 구한다.
    *
-   * 기기가 주는 값은 WGS84 타원체 기준이라 해수면 기준 표고와 다르다.
-   * 한반도에서는 대략 20~25m 정도 높게 나온다. 대원끼리의 상대 고도차나
-   * 오르내림 추세를 보는 데는 문제가 없지만, 지도의 표고와는 차이가 난다.
+   * 기기가 주는 고도는 WGS84 타원체 기준이어서 지도에 적힌 표고와 다르다.
+   * 한반도에서는 17~33m 더 높게 나온다. geoid.js 의 표로 그 차이를 빼서
+   * 해발고도로 바꾼다. 주고받는 데이터에는 기기 원본값을 그대로 두므로
+   * 나중에 보정식을 고쳐도 예전 기록이 틀어지지 않는다.
+   *
+   * @returns {{meters: number, corrected: boolean}|null} 고도가 없으면 null
    */
-  function displayAltitude(altitude) {
-    if (!isFiniteNumber(altitude)) return null;
-    return Math.round(altitude) + "m";
+  function altitudeOf(member) {
+    if (!isFiniteNumber(member.altitude)) return null;
+
+    var msl =
+      window.RtlocGeoid && isFiniteNumber(member.lat) && isFiniteNumber(member.lng)
+        ? RtlocGeoid.orthometric(member.altitude, member.lat, member.lng)
+        : null;
+
+    // 보정 범위(한반도) 밖이면 원본값을 그대로 보여 주고 그 사실을 알린다.
+    if (msl === null) return { meters: member.altitude, corrected: false };
+    return { meters: msl, corrected: true };
+  }
+
+  /** 표시용 고도 문자열. 값이 없으면 null. */
+  function displayAltitude(member) {
+    var alt = altitudeOf(member);
+    return alt ? Math.round(alt.meters) + "m" : null;
   }
 
   /**
@@ -3187,7 +3209,7 @@
   function makeIcon(member) {
     var name = String(member.name || "");
     var initial = escapeHtml(name.trim().charAt(0) || "?");
-    var alt = displayAltitude(member.altitude);
+    var alt = displayAltitude(member);
 
     return (
       '<div class="pin-wrap' +
@@ -3276,14 +3298,17 @@
   function metaText(member, now) {
     var parts = [];
     parts.push(member.lat.toFixed(5) + ", " + member.lng.toFixed(5));
-    var alt = displayAltitude(member.altitude);
+    var alt = altitudeOf(member);
     if (alt) {
       parts.push(
         "고도 " +
-          alt +
+          Math.round(alt.meters) +
+          "m" +
           (isFiniteNumber(member.altitudeAccuracy)
             ? " ±" + Math.round(member.altitudeAccuracy) + "m"
-            : "")
+            : "") +
+          // 보정하지 못한 값은 지도 표고와 다르므로 그 사실을 밝힌다
+          (alt.corrected ? "" : " (타원체 기준)")
       );
     }
     if (member.accuracy != null) parts.push("정확도 ±" + Math.round(member.accuracy) + "m");
