@@ -18,8 +18,8 @@ android {
         applicationId 'kr.teamloc.share'
         minSdk 24
         targetSdk 34
-        versionCode 15
-        versionName '1.5.3'
+        versionCode 16
+        versionName '1.5.4'
     }
 
     signingConfigs {
@@ -66,6 +66,10 @@ dependencies {
 
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core:1.13.1'
+
+    // 화면이 꺼진 상태에서도 5초 간격 고정밀 위치를 요청한다.
+    // 버전을 고정한다. 21.4.0 은 Google Maven 의 2026-06-25 최신 안정 릴리스다.
+    implementation 'com.google.android.gms:play-services-location:21.4.0'
 
     // 백그라운드 서비스에서 쓸 MQTT 클라이언트. wss(WebSocket over TLS) 를 지원한다.
     implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'

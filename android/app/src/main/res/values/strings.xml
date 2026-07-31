@@ -8,9 +8,11 @@
 
     <string name="tracking_channel">위치 추적</string>
     <string name="message_channel">팀 메시지</string>
-    <string name="tracking_starting">위치 추적을 준비하는 중…</string>
+    <string name="tracking_starting">5초 고정밀 위치 추적을 준비하는 중…</string>
     <string name="messaging_active">팀 메시지를 받는 중 (위치 권한이 없어 추적 불가)</string>
-    <string name="tracking_active">화면이 꺼져도 팀에 위치를 보내는 중</string>
+    <string name="tracking_active">화면이 꺼져도 5초마다 고정밀 위치를 보내는 중</string>
+    <string name="tracking_waiting_for_gps">고정밀 GPS 신호를 기다리는 중…</string>
+    <string name="tracking_unavailable">위치 추적을 시작하지 못했습니다. 앱을 열어 권한과 GPS를 확인해 주세요.</string>
     <string name="tracking_offline">브로커에 연결하지 못했습니다. 재시도 중…</string>
     <string name="tracking_no_permission">위치 권한이 없어 추적할 수 없습니다. 앱을 열어 확인해 주세요.</string>
 

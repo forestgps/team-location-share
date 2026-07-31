@@ -20,27 +20,21 @@
 
   // ---------- 튀는 위치 걸러내기 ----------
   //
-  // 화면이 꺼져 있으면 GPS 갱신이 뜸해지고, 그 빈자리를 기지국·와이파이 측위가 채운다.
-  // 그 값은 오차가 수백 미터에서 수 킬로미터다. 그대로 경로에 넣으면 가지도 않은 곳을
-  // 다녀온 선이 그려지고, 화면을 다시 켜면 위치가 크게 튄 것처럼 보인다.
-  // 화면 꺼짐 구간의 "GPS 가 튄다" 는 대부분 이것이다.
+  // v1.5.3 은 90초 동안 좋은 위치가 없으면 오차 1km 까지 받아 줬다. 화면을 꺼낸 뒤
+  // 경로가 계속 보이게 하려는 선택이었지만, 그 한 점이 가지도 않은 곳까지 선을 끌고 가서
+  // 경로 전체를 망쳤다. 이제 기다린 시간과 상관없이 같은 엄격한 기준을 쓴다.
+  // 정확한 새 위치가 없으면 그 구간은 비워 둔다. 거친 점으로 거짓 경로를 만드는 것보다 낫다.
   //
-  // 그래서 받은 위치를 그대로 믿지 않는다. 판단 순서는 이렇다.
-  //   1. 너무 거친 값(MAX_ACCURACY 초과)은 버린다
-  //   2. 정밀한 값(GOOD_ACCURACY 이내)은 무조건 받는다 — 이게 우리가 원하는 값이다
-  //   3. 그 사이의 어중간한 값은 갈 수 없는 속도로 튀었으면 버리고,
-  //      앞선 값보다 크게 나빠졌으면 버린다(좋은 값을 거친 값으로 덮지 않는다)
-  //   4. 다만 쓸 만한 값이 STALE_AFTER 동안 하나도 없었으면 기준을 눕힌다.
-  //      실내에서 아무것도 모르는 것보다는 거친 값이라도 아는 편이 낫다.
+  // 판단 순서:
+  //   1. 오차를 알 수 없거나 MAX_ACCURACY 를 넘으면 버린다
+  //   2. GOOD_ACCURACY 이내의 정밀한 값은 받는다
+  //   3. 그 사이 값은 갈 수 없는 속도로 튀었거나 앞선 값보다 크게 나빠졌으면 버린다
   //
-  // 2번을 3번보다 앞에 두는 게 중요하다. 정밀한 값이 "갈 수 없는 속도" 로 보이는 경우가
-  // 있는데, 그건 새 값이 틀린 게 아니라 비교 대상인 앞선 값이 낡았기 때문이다(절전 중에는
-  // 마지막 위치를 그대로 다시 보내기도 한다). 그때 새 값을 버리면 진짜 위치를 놓친다.
+  // 2번을 속도 검사보다 먼저 하는 게 중요하다. 절전 중에는 앞선 위치가 오래됐을 수 있어서,
+  // 새 정밀 위치가 순간이동처럼 보이더라도 실제로는 새 값이 맞는 경우가 많다.
   var GOOD_ACCURACY = 50; // m. 이보다 정확하면 두 번 묻지 않는다
-  var MAX_ACCURACY = 200; // m. 이보다 부정확하면 경로에 넣지 않는다
-  var STALE_MAX_ACCURACY = 1000; // m. 오래 굶었을 때만 여기까지 받아 준다
+  var MAX_ACCURACY = 100; // m. 이보다 부정확하면 시간과 상관없이 경로에 넣지 않는다
   var ACCURACY_SLACK = 30; // m. 앞선 값보다 이만큼까지 나빠지는 건 눈감아 준다
-  var STALE_AFTER = 90000; // ms. 이만큼 쓸 만한 값이 없으면 기준을 눕힌다
   var MAX_SPEED = 55; // m/s. 약 200km/h. 이보다 빠른 이동은 튄 값으로 본다
 
   /**
@@ -55,39 +49,26 @@
   function acceptFix(prev, next) {
     if (!next || !isNum(next.lat) || !isNum(next.lng) || !isNum(next.ts)) return false;
 
-    var acc = isNum(next.acc) ? next.acc : null;
+    var acc = isNum(next.acc) && next.acc > 0 ? next.acc : null;
+    if (acc === null || acc > MAX_ACCURACY) return false;
 
-    // 첫 위치. 비교할 게 없으니 기준을 눕힌다. 접속 직후에는 GPS 가 잡히기 전이라
-    // 기지국 측위부터 들어오는데, 그것마저 버리면 내 위치가 한동안 안 뜬다.
-    // 거친 값은 오차 원이 크게 그려져서 그 자체로 "대략 이 근처" 라고 알려 준다.
-    if (!prev || !isNum(prev.ts)) return acc === null || acc <= STALE_MAX_ACCURACY;
+    // 첫 위치도 정확도 100m 이내여야 한다. 접속 직후 대략 위치를 빨리 보여 주는 것보다
+    // 임무 경로에 틀린 첫 점을 박지 않는 것이 중요하다.
+    if (!prev || !isNum(prev.ts)) return true;
 
     var gap = next.ts - prev.ts;
-    if (gap < 0) return false; // 순서가 뒤집힌 값
+    if (gap <= 0) return false; // 중복 또는 순서가 뒤집힌 값
 
-    var starved = gap >= STALE_AFTER;
+    // 정밀한 값은 앞선 값보다 우선한다. 비교 대상이 오래됐을 수 있다.
+    if (acc <= GOOD_ACCURACY) return true;
 
-    // 1. 어떤 경우에도 넘지 못하는 선.
-    if (acc !== null && acc > (starved ? STALE_MAX_ACCURACY : MAX_ACCURACY)) return false;
-
-    // 2. 정밀한 값은 무조건 받는다.
-    if (acc !== null && acc <= GOOD_ACCURACY) return true;
-
-    // 4. 오래 굶었으면 거친 값이라도 받는다.
-    if (starved) return true;
-
-    // 3. 어중간한 값은 따져 본다. 먼저 갈 수 없는 속도인지.
-    if (gap > 0) {
-      var moved = haversine(prev.lat, prev.lng, next.lat, next.lng);
-      // 두 값의 오차 범위가 겹치는 만큼은 실제로 움직인 게 아닐 수 있다. 빼고 본다.
-      var slack = (acc || 0) + (isNum(prev.acc) ? prev.acc : 0);
-      if (Math.max(0, moved - slack) / (gap / 1000) > MAX_SPEED) return false;
-    }
-
-    if (acc === null) return true;
+    var moved = haversine(prev.lat, prev.lng, next.lat, next.lng);
+    // 두 값의 오차 범위가 겹치는 만큼은 실제로 움직인 게 아닐 수 있다. 빼고 본다.
+    var slack = acc + (isNum(prev.acc) && prev.acc > 0 ? prev.acc : 0);
+    if (Math.max(0, moved - slack) / (gap / 1000) > MAX_SPEED) return false;
 
     // 앞선 값보다 크게 나빠졌으면 버린다.
-    var prevAcc = isNum(prev.acc) ? prev.acc : GOOD_ACCURACY;
+    var prevAcc = isNum(prev.acc) && prev.acc > 0 ? prev.acc : GOOD_ACCURACY;
     return acc <= prevAcc + ACCURACY_SLACK;
   }
 
@@ -121,6 +102,8 @@
         var last = points[points.length - 1];
 
         if (last) {
+          // QoS 1 중복과 복귀 시 늦게 들어온 WebView fix가 경로 시각을 뒤집지 못하게 한다.
+          if (ts <= last[2]) return false;
           var movedEnough = haversine(last[0], last[1], lat, lng) >= MIN_POINT_DISTANCE;
           var waitedEnough = ts - last[2] >= MIN_POINT_INTERVAL;
           if (!movedEnough && !waitedEnough) return false;

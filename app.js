@@ -75,7 +75,8 @@
     recorder: null, // 임무 진행 중일 때만 존재
     clockTimer: null,
     pendingMission: null, // 저장 창에 올라와 있는 임무
-    trailAbsorbedAt: 0, // 백그라운드 경로를 어디까지 가져왔는지(ms)
+    trailAbsorbedAt: 0, // 구버전 APK timestamp trail cursor(ms)
+    trailAbsorbedSequence: 0, // v1.5.4+ native 삽입 순서 cursor
     videoRendering: false, // 경로 영상을 녹화하는 중인지
     manualSaveUrl: null, // 수동 저장 링크에 걸어 둔 임시 URL
     historyLayer: null, // 과거 임무를 지도에 겹쳐 볼 때 쓰는 레이어
@@ -1750,12 +1751,42 @@
   function startMission(remote, isLocal) {
     if (state.recorder) return;
 
+    // recorder 생성보다 먼저 native 경계를 고정한다. 생성/UI 작업 사이에 들어온 점도
+    // cursor 이후가 되어 임무 첫 구간에서 빠지지 않는다.
+    var sequenceTrail = false;
+    var sequenceCursor = 0;
+    var boundaryAt = Date.now();
+    var bridge = window.AndroidBridge;
+    if (bridge && typeof bridge.trailAfter === "function") {
+      try {
+        if (typeof bridge.trailBoundary === "function") {
+          var boundary = JSON.parse(bridge.trailBoundary() || "{}");
+          if (isFiniteNumber(boundary.seq) && boundary.seq >= 0) {
+            sequenceCursor = boundary.seq;
+            if (isFiniteNumber(boundary.at)) boundaryAt = boundary.at;
+            sequenceTrail = true;
+          }
+        } else if (typeof bridge.trailCursor === "function") {
+          var cursor = Number(bridge.trailCursor());
+          if (isFiniteNumber(cursor) && cursor >= 0) {
+            sequenceCursor = cursor;
+            sequenceTrail = true;
+          }
+        }
+      } catch (e) {
+        sequenceTrail = false;
+      }
+    }
+
     state.recorder = RtlocMission.createRecorder({
       missionId: remote ? remote.missionId : RtlocMission.newId(),
-      startedAt: remote ? remote.at : Date.now(),
+      startedAt: remote ? remote.at : boundaryAt,
       teamName: state.teamName,
       teamKey: state.topic
     });
+
+    state.trailAbsorbedAt = state.recorder.startedAt;
+    state.trailAbsorbedSequence = sequenceCursor;
 
     el.missionStartBtn.hidden = true;
     el.missionEndBtn.hidden = false;
@@ -1764,15 +1795,15 @@
     updateClock();
     state.clockTimer = setInterval(updateClock, 1000);
 
-    // 이미 알고 있는 위치를 경로의 첫 점으로 넣어 둔다.
-    Object.keys(state.members).forEach(function (id) {
-      var m = state.members[id];
-      state.recorder.addPoint(id, m.name, m.lat, m.lng, m.updatedAt);
-      drawTrail(m);
-    });
-
-    // 백그라운드 경로를 어디서부터 가져올지 기준을 잡는다.
-    state.trailAbsorbedAt = state.recorder.startedAt;
+    // sequence trail 앱에서는 WebView 좌표를 seed로 섞지 않는다. 다음 native fix가
+    // 최대 약 5초 뒤 첫 점이 된다. 일반 브라우저와 구형 APK만 기존 화면 좌표를 쓴다.
+    if (!sequenceTrail) {
+      Object.keys(state.members).forEach(function (id) {
+        var m = state.members[id];
+        state.recorder.addPoint(id, m.name, m.lat, m.lng, m.fixAt || m.updatedAt);
+        drawTrail(m);
+      });
+    }
 
     if (isLocal) {
       publish({
@@ -2714,6 +2745,10 @@
   function isBackgroundTracking() {
     var bridge = window.AndroidBridge;
     try {
+      if (bridge && typeof bridge.locationTrackingState === "function") {
+        var trackingState = String(bridge.locationTrackingState());
+        return trackingState === "starting" || trackingState === "active";
+      }
       return !!(bridge && bridge.isTracking && bridge.isTracking());
     } catch (e) {
       return false;
@@ -2925,7 +2960,7 @@
       settled = true;
       setStatus("online", "연결됨");
 
-      client.subscribe(state.topic, { qos: 0 }, function (err) {
+      client.subscribe(state.topic, { qos: 1 }, function (err) {
         if (err) {
           setStatus("offline", "구독 실패");
           toast("팀 채널 구독에 실패했습니다.");
@@ -2994,12 +3029,14 @@
     window.addEventListener("beforeunload", sendLeave);
   }
 
-  function publish(obj) {
+  function publish(obj, qos) {
     if (!state.client || !state.client.connected) return;
     var client = state.client;
     encryptMessage(obj)
       .then(function (envelope) {
-        if (client.connected) client.publish(state.topic, envelope, { qos: 0, retain: false });
+        if (client.connected) {
+          client.publish(state.topic, envelope, { qos: qos === 1 ? 1 : 0, retain: false });
+        }
       })
       .catch(function () {
         // 암호화 실패 시에는 전송하지 않는다. 평문으로 새어나가면 안 된다.
@@ -3129,9 +3166,17 @@
     }
 
     if (msg.type === "pos" && isFiniteNumber(msg.lat) && isFiniteNumber(msg.lng)) {
+      // QoS 1 은 같은 메시지를 한 번 더 전달할 수 있다. 송신자가 넣은 fix 시각을 필터에
+      // 써야 같은 점을 중복으로 기록하지 않는다. 기기 시각이 하루 넘게 어긋났으면 수신 시각을 쓴다.
+      var receivedAt = Date.now();
+      var fixTimestamp =
+        isFiniteNumber(msg.ts) && Math.abs(receivedAt - msg.ts) < 24 * 60 * 60 * 1000
+          ? msg.ts
+          : receivedAt;
+
       // 보낸 대원의 기기에서 걸러졌어야 하지만, 구버전 앱이 섞여 있을 수 있다.
       // 받는 쪽에서도 같은 기준으로 한 번 더 본다. 튀는 값은 남의 마커와 경로도 망친다.
-      if (!acceptFix(msg.id, msg.lat, msg.lng, Date.now(), msg.acc)) return;
+      if (!acceptFix(msg.id, msg.lat, msg.lng, fixTimestamp, msg.acc)) return;
 
       upsertMember({
         id: msg.id,
@@ -3143,7 +3188,8 @@
         speed: isFiniteNumber(msg.spd) ? msg.spd : null,
         altitude: isFiniteNumber(msg.alt) ? msg.alt : null,
         altitudeAccuracy: isFiniteNumber(msg.altAcc) ? msg.altAcc : null,
-        updatedAt: Date.now()
+        updatedAt: receivedAt, // 마커 stale 판단용 로컬 수신 시각
+        fixAt: fixTimestamp // recorder/native trail과 공유하는 source fix 시각
       });
       renderMembers();
     }
@@ -3181,8 +3227,8 @@
   function startTracking() {
     state.watchId = navigator.geolocation.watchPosition(
       function (position) {
-        // 화면을 다시 켠 직후에는 기지국 측위가 GPS 보다 먼저 온다.
-        // 오차가 수백 미터인 그 값을 그대로 쓰면 내 마커가 엉뚱한 곳으로 튄다.
+        // 화면을 다시 켠 직후에는 캐시·기지국 위치가 GPS 보다 먼저 올 수 있다.
+        // 100m 를 넘는 값은 mission.js 공통 필터에서 버린다.
         var fixTime = isFiniteNumber(position.timestamp) ? position.timestamp : Date.now();
         if (!acceptFix(
               state.clientId,
@@ -3194,12 +3240,17 @@
           return;
         }
 
+        // 복귀 직후 브라우저의 현재점을 먼저 기록하면, 그보다 오래된 네이티브 경로가
+        // "이미 지난 시각" 으로 버려진다. 현재점을 넣기 전에 백그라운드 구간부터 흡수한다.
+        if (state.recorder && window.AndroidBridge) absorbBackgroundTrail();
+
         state.lastPosition = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
           accuracy: position.coords.accuracy,
           heading: position.coords.heading,
           speed: position.coords.speed,
+          fixTime: fixTime,
           // 고도는 GPS 가 잡혀야 나온다. 실내나 와이파이 측위에서는 null 이다.
           altitude: position.coords.altitude,
           altitudeAccuracy: position.coords.altitudeAccuracy
@@ -3215,7 +3266,8 @@
           speed: state.lastPosition.speed,
           altitude: state.lastPosition.altitude,
           altitudeAccuracy: state.lastPosition.altitudeAccuracy,
-          updatedAt: Date.now(),
+          updatedAt: fixTime,
+          fixAt: fixTime,
           isMe: true
         });
         renderMembers();
@@ -3235,12 +3287,43 @@
         };
         toast(messages[error.code] || "위치 오류: " + error.message, 6000);
       },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
+      // 캐시된 위치를 복귀 직후 새 위치로 오인하지 않는다. 앱에서는 네이티브 Fused Location 이
+      // 5초 추적을 전담하고, 이 watch 는 내 화면 마커를 그리는 데만 쓴다.
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
     );
   }
 
+  /**
+   * v1.5.4+ 네이티브 publisher가 등록 중이거나 실제 등록된 동안에만 소유권을 넘긴다.
+   * 구형 APK는 startTracking 함수만 있으므로 capability가 없으면 웹 발행을 유지한다.
+   * 현재 앱에서도 권한/등록 실패로 unavailable이면 WebView가 안전한 fallback이 된다.
+   */
+  function nativeOwnsPositionPublishing() {
+    var bridge = window.AndroidBridge;
+    if (
+      !bridge ||
+      typeof bridge.nativeLocationPublisherVersion !== "function" ||
+      typeof bridge.locationTrackingState !== "function"
+    ) {
+      return false;
+    }
+
+    try {
+      if (Number(bridge.nativeLocationPublisherVersion()) < 2) return false;
+      var trackingState = String(bridge.locationTrackingState());
+      return trackingState === "starting" || trackingState === "active";
+    } catch (e) {
+      return false;
+    }
+  }
+
   function publishPosition(force) {
+    // 예전에는 WebView 와 TrackerService 가 같은 대원 id 로 서로 다른 위치를 동시에 보냈다.
+    // 화면을 켜는 순간 두 흐름이 섞여 경로가 지그재그가 될 수 있었다. 앱에서는 네이티브가
+    // 화면 켜짐/꺼짐 모두 전담하고, 웹 발행은 일반 브라우저에서만 한다.
+    if (nativeOwnsPositionPublishing()) return;
     if (!state.lastPosition) return;
+
     var now = Date.now();
     if (!force && now - state.lastPublishedAt < PUBLISH_MIN_INTERVAL) return;
     state.lastPublishedAt = now;
@@ -3259,8 +3342,9 @@
       altAcc: isFiniteNumber(state.lastPosition.altitudeAccuracy)
         ? Math.round(state.lastPosition.altitudeAccuracy)
         : null,
-      ts: now
-    });
+      // heartbeat 도 같은 fix 시각을 유지한다. 오래된 좌표에 새 시각을 붙여 경로를 늘리지 않는다.
+      ts: state.lastPosition.fixTime || now
+    }, 1); // WebView fallback 위치도 종단 간 QoS 1
   }
 
   // ---------- 색상 배분 ----------
@@ -3349,6 +3433,7 @@
       altitude: data.altitude == null ? null : data.altitude,
       altitudeAccuracy: data.altitudeAccuracy == null ? null : data.altitudeAccuracy,
       updatedAt: data.updatedAt,
+      fixAt: isFiniteNumber(data.fixAt) ? data.fixAt : data.updatedAt,
       isMe: !!data.isMe
     });
 
@@ -3368,14 +3453,16 @@
       member.circle.setColor(member.color);
     }
 
-    // 임무 중이면 이동 경로를 기록하고 선을 늘린다.
-    if (state.recorder) {
+    // 내 위치는 native publisher가 준비된 동안 native trail만 쓴다. 원격 대원은 Web MQTT도
+    // 계속 source fix 시각으로 기록한다. native SUBACK이 늦거나 실패해도 경로가 비지 않고,
+    // 나중에 같은 native trail이 오면 Recorder의 timestamp guard가 중복을 제거한다.
+    if (state.recorder && (!member.isMe || !nativeOwnsPositionPublishing())) {
       var added = state.recorder.addPoint(
         member.id,
         member.name,
         member.lat,
         member.lng,
-        member.updatedAt
+        member.fixAt
       );
       if (added) drawTrail(member);
     }
@@ -3388,41 +3475,55 @@
    * 보내지만 경로에 기록하는 주체가 없어서, 돌아왔을 때 한 점만 찍히고 그 사이가
    * 직선으로 이어져 "순식간에 이동한" 것처럼 보였다.
    *
-   * @returns {number} 새로 채워 넣은 점 수
+   * @returns {{added:number, dropped:number}} 새로 넣은 점 수와 정확도 때문에 버린 점 수
    */
   function absorbBackgroundTrail() {
-    if (!state.recorder) return 0;
+    if (!state.recorder) return { added: 0, dropped: 0 };
 
     var bridge = window.AndroidBridge;
-    if (!bridge || typeof bridge.trailSince !== "function") return 0; // 웹 브라우저이거나 구버전 앱
+    if (!bridge) return { added: 0, dropped: 0 }; // 일반 웹 브라우저
 
-    var since = state.trailAbsorbedAt || state.recorder.startedAt;
+    var useSequence =
+      typeof bridge.trailAfter === "function" && typeof bridge.trailCursor === "function";
+    if (!useSequence && typeof bridge.trailSince !== "function") {
+      return { added: 0, dropped: 0 }; // sequence도 timestamp 계약도 없는 앱
+    }
+
+    var cursor = useSequence
+      ? state.trailAbsorbedSequence || 0
+      : state.trailAbsorbedAt || state.recorder.startedAt;
     var list;
     try {
-      list = JSON.parse(bridge.trailSince(String(since)) || "[]");
+      var raw = useSequence
+        ? bridge.trailAfter(String(cursor))
+        : bridge.trailSince(String(cursor));
+      list = JSON.parse(raw || "[]");
     } catch (e) {
-      return 0;
+      return { added: 0, dropped: 0 };
     }
-    if (!list || !list.length) return 0;
+    if (!list || !list.length) return { added: 0, dropped: 0 };
 
-    // 시각 순으로 넣어야 경로가 지그재그가 되지 않는다.
+    // v1.5.4+는 native 삽입 순서로, 구버전만 source timestamp 순으로 처리한다.
     list.sort(function (a, b) {
-      return a.ts - b.ts;
+      return useSequence ? Number(a.seq || 0) - Number(b.seq || 0) : a.ts - b.ts;
     });
 
     var touched = Object.create(null);
     var added = 0;
     var dropped = 0;
-    var newest = since;
+    var newest = cursor;
 
-    // 여기서 들어오는 건 과거 위치다. 지금 시각 기준의 state.fixes 와 비교하면 전부
-    // "순서가 뒤집혔다" 고 판단되므로, 이 구간만의 기준점을 따로 이어 나간다.
+    // source timestamp는 대원별 필터에만 쓴다. 여러 기기의 서로 다른 시계를
+    // 전역 cursor로 합치면 시계가 빠른 한 대원이 다른 대원의 경로를 건너뛴다.
     var chain = Object.create(null);
 
     list.forEach(function (fix) {
+      if (useSequence && isFiniteNumber(fix && fix.seq) && fix.seq > newest) {
+        newest = fix.seq;
+      }
       if (!fix || !fix.id) return;
       if (!isFiniteNumber(fix.lat) || !isFiniteNumber(fix.lng) || !isFiniteNumber(fix.ts)) return;
-      if (fix.ts > newest) newest = fix.ts;
+      if (!useSequence && fix.ts > newest) newest = fix.ts;
 
       // 이미 그 대원의 마지막 점보다 오래된 것은 버린다.
       // 복귀 직후 들어온 실시간 위치가 먼저 기록됐을 수 있다.
@@ -3452,7 +3553,8 @@
       }
     });
 
-    state.trailAbsorbedAt = newest;
+    if (useSequence) state.trailAbsorbedSequence = newest;
+    else state.trailAbsorbedAt = newest;
 
     Object.keys(touched).forEach(function (id) {
       var member = state.members[id];

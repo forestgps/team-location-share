@@ -945,7 +945,10 @@ public class MainActivity extends AppCompatActivity {
      * 그 사실을 적어 두고, 웹 화면이 안내 창으로 다시 알려 준다.
      */
     private void startService(boolean withLocation) {
-        if (pendingTeam == null || pendingSecret == null || pendingClientId == null) return;
+        if (pendingTeam == null || pendingSecret == null || pendingClientId == null) {
+            if (withLocation) TrackerService.markLocationTrackingUnavailable();
+            return;
+        }
 
         Intent intent = new Intent(this, TrackerService.class)
                 .setAction(TrackerService.ACTION_START)
@@ -958,10 +961,15 @@ public class MainActivity extends AppCompatActivity {
                 .putExtra("brokerPass", pendingBrokerPass)
                 .putExtra("trackLocation", withLocation);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+        } catch (RuntimeException e) {
+            if (withLocation) TrackerService.markLocationTrackingUnavailable();
+            Log.e(TAG, "추적 서비스 시작 실패", e);
         }
     }
 
@@ -1175,6 +1183,21 @@ public class MainActivity extends AppCompatActivity {
             pendingBrokerPass = pass;
         }
 
+        /**
+         * 웹이 네이티브 단일 위치 발행 계약을 지원하는 앱인지 구분하는 capability.
+         * v1.5.1~v1.5.3에도 startTracking()은 있으므로 함수 존재만으로 판정하면 안 된다.
+         */
+        @JavascriptInterface
+        public int nativeLocationPublisherVersion() {
+            return 2;
+        }
+
+        /** "starting", "active", "unavailable" 중 하나를 반환한다. */
+        @JavascriptInterface
+        public String locationTrackingState() {
+            return TrackerService.locationTrackingState();
+        }
+
         private void remember(String team, String secret, String callsign,
                              String clientId, String broker) {
             pendingTeam = team;
@@ -1209,6 +1232,8 @@ public class MainActivity extends AppCompatActivity {
         public void startTracking(String team, String secret, String callsign,
                                   String clientId, String broker) {
             remember(team, secret, callsign, clientId, broker);
+            // UI thread가 서비스를 실제로 시작할 때까지 웹 발행이 잠깐 겹치지 않게 한다.
+            TrackerService.markLocationTrackingStarting();
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
@@ -1233,6 +1258,30 @@ public class MainActivity extends AppCompatActivity {
             Intent intent = new Intent(MainActivity.this, TrackerService.class)
                     .setAction(TrackerService.ACTION_STOP);
             MainActivity.this.startService(intent);
+        }
+
+        /** 임무 시작 시각과 sequence cursor를 원자적으로 고정한다. */
+        @JavascriptInterface
+        public String trailBoundary() {
+            return TrackerService.trailBoundary();
+        }
+
+        /** v1.5.4 sequence 기반 trail 조회를 시작할 현재 cursor. */
+        @JavascriptInterface
+        public String trailCursor() {
+            return TrackerService.trailCursor();
+        }
+
+        /** source 기기 시각이 아니라 native 삽입 순서 이후의 경로를 돌려준다. */
+        @JavascriptInterface
+        public String trailAfter(String sequence) {
+            long after = 0;
+            try {
+                after = Long.parseLong(String.valueOf(sequence).trim());
+            } catch (Exception ignored) {
+                /* 잘못된 값이면 현재 queue 처음부터 준다 */
+            }
+            return TrackerService.trailAfter(after);
         }
 
         /**
