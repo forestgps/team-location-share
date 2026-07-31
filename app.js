@@ -72,6 +72,7 @@
     recorder: null, // 임무 진행 중일 때만 존재
     clockTimer: null,
     pendingMission: null, // 저장 창에 올라와 있는 임무
+    trailAbsorbedAt: 0, // 백그라운드 경로를 어디까지 가져왔는지(ms)
     videoRendering: false, // 경로 영상을 녹화하는 중인지
     manualSaveUrl: null, // 수동 저장 링크에 걸어 둔 임시 URL
     historyLayer: null, // 과거 임무를 지도에 겹쳐 볼 때 쓰는 레이어
@@ -437,6 +438,15 @@
     if (!RtlocMap.isReady()) showMapLoadError();
 
     setupMapTypes();
+
+    // 앱이 다시 앞으로 나오면, 멈춰 있던 동안의 경로를 서비스에서 가져와 메꾼다.
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      var added = absorbBackgroundTrail();
+      if (added > 0) {
+        toast("화면이 꺼져 있던 동안의 이동 경로 " + added + "개 지점을 이어 붙였습니다.", 5000);
+      }
+    });
 
     state.map.on("dragstart", function () {
       if (state.follow) setFollow(false);
@@ -1739,6 +1749,9 @@
       drawTrail(m);
     });
 
+    // 백그라운드 경로를 어디서부터 가져올지 기준을 잡는다.
+    state.trailAbsorbedAt = state.recorder.startedAt;
+
     if (isLocal) {
       publish({
         type: "mission",
@@ -1749,13 +1762,34 @@
         at: state.recorder.startedAt
       });
       toast("임무를 시작했습니다. 대원들의 이동 경로를 기록합니다.");
+      warnIfBackgroundTrackingOff();
     } else {
       toast((remote.name || "대원") + " 님이 임무를 시작했습니다.", 5000);
+      warnIfBackgroundTrackingOff();
     }
+  }
+
+  /**
+   * 화면 꺼짐 추적이 꺼진 채로 임무를 하면 앱을 뒤로 보낸 구간이 통째로 빈다.
+   * 그때는 서비스가 위치를 받지 않으므로 나중에 메꿀 방법도 없다. 미리 알려 준다.
+   */
+  function warnIfBackgroundTrackingOff() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.isTracking !== "function") return; // 웹 브라우저
+    if (isBackgroundTracking()) return;
+
+    toast(
+      "화면 꺼짐 추적이 꺼져 있습니다. 앱을 뒤로 보내거나 화면을 끄면 그 구간 경로가 기록되지 않습니다.",
+      9000
+    );
   }
 
   function endMission(isLocal) {
     if (!state.recorder) return;
+
+    // 화면이 꺼져 있던 동안의 경로를 먼저 채워 넣는다.
+    // 이걸 빼먹으면 그 시간대가 직선 한 줄로 저장된다.
+    absorbBackgroundTrail();
 
     var recorder = state.recorder;
     state.recorder = null;
@@ -3138,6 +3172,65 @@
       );
       if (added) drawTrail(member);
     }
+  }
+
+  /**
+   * 화면이 꺼져 있던 동안 네이티브 서비스가 모아 둔 위치를 임무 경로에 채워 넣는다.
+   *
+   * 앱을 뒤로 보내면 이 화면(자바스크립트)이 멈춘다. 위치는 서비스가 계속 받아
+   * 보내지만 경로에 기록하는 주체가 없어서, 돌아왔을 때 한 점만 찍히고 그 사이가
+   * 직선으로 이어져 "순식간에 이동한" 것처럼 보였다.
+   *
+   * @returns {number} 새로 채워 넣은 점 수
+   */
+  function absorbBackgroundTrail() {
+    if (!state.recorder) return 0;
+
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.trailSince !== "function") return 0; // 웹 브라우저이거나 구버전 앱
+
+    var since = state.trailAbsorbedAt || state.recorder.startedAt;
+    var list;
+    try {
+      list = JSON.parse(bridge.trailSince(String(since)) || "[]");
+    } catch (e) {
+      return 0;
+    }
+    if (!list || !list.length) return 0;
+
+    // 시각 순으로 넣어야 경로가 지그재그가 되지 않는다.
+    list.sort(function (a, b) {
+      return a.ts - b.ts;
+    });
+
+    var touched = Object.create(null);
+    var added = 0;
+    var newest = since;
+
+    list.forEach(function (fix) {
+      if (!fix || !fix.id) return;
+      if (!isFiniteNumber(fix.lat) || !isFiniteNumber(fix.lng) || !isFiniteNumber(fix.ts)) return;
+      if (fix.ts > newest) newest = fix.ts;
+
+      // 이미 그 대원의 마지막 점보다 오래된 것은 버린다.
+      // 복귀 직후 들어온 실시간 위치가 먼저 기록됐을 수 있다.
+      var track = state.recorder.trackOf(fix.id);
+      if (track && track.points.length && fix.ts <= track.points[track.points.length - 1][2]) return;
+
+      if (state.recorder.addPoint(fix.id, fix.name || "대원", fix.lat, fix.lng, fix.ts)) {
+        touched[fix.id] = true;
+        added++;
+      }
+    });
+
+    state.trailAbsorbedAt = newest;
+
+    Object.keys(touched).forEach(function (id) {
+      var member = state.members[id];
+      if (member) drawTrail(member);
+    });
+
+    return added;
   }
 
   /** 기록된 경로를 지도 위 선으로 반영한다. */

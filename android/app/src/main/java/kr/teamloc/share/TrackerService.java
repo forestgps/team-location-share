@@ -95,6 +95,8 @@ public class TrackerService extends Service {
         String action = intent != null ? intent.getAction() : null;
 
         if (ACTION_STOP.equals(action)) {
+            // 팀에서 나가는 것이므로 모아 둔 경로도 버린다. 다음 임무에 섞이면 안 된다.
+            clearTrail();
             stopTracking();
             return START_NOT_STICKY;
         }
@@ -176,6 +178,12 @@ public class TrackerService extends Service {
         @Override
         public void onLocationChanged(Location location) {
             lastLocation = location;
+            // 화면이 꺼져 있는 동안에도 임무 경로가 이어지도록 따로 모아 둔다.
+            remember(clientId, callsign,
+                    location.getLatitude(), location.getLongitude(),
+                    location.hasAltitude() ? location.getAltitude() : Double.NaN,
+                    Math.round(location.getAccuracy()),
+                    System.currentTimeMillis());
             publishIfDue(false);
         }
 
@@ -283,7 +291,16 @@ public class TrackerService extends Service {
             return; // 다른 팀 암호로 온 메시지. 조용히 버린다.
         }
 
-        if (!"chat".equals(TeamCrypto.extract(json, "type"))) return;
+        String type = TeamCrypto.extract(json, "type");
+
+        // 화면이 꺼져 있는 동안 도착한 대원 위치도 모아 둔다.
+        // 예전에는 그냥 버려서, 돌아왔을 때 그 시간대 경로가 통째로 비었다.
+        if ("pos".equals(type)) {
+            rememberIncoming(json);
+            return;
+        }
+
+        if (!"chat".equals(type)) return;
 
         String senderId = TeamCrypto.extract(json, "senderId");
         if (clientId.equals(senderId)) return; // 내가 보낸 메시지
@@ -493,6 +510,134 @@ public class TrackerService extends Service {
 
     private static String orEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    // ---------- 임무 경로 보관 ----------
+    //
+    // 앱이 뒤로 가면 웹 화면(자바스크립트)이 멈춘다. 위치는 이 서비스가 계속 받고 보내지만
+    // 임무 경로에 기록하는 주체가 없어서, 돌아왔을 때 한 점만 찍히고 그 사이가 직선으로
+    // 이어져 버렸다. 그래서 받은 위치를 여기에 모아 두고, 웹 화면이 다시 앞으로 나올 때
+    // 가져가 경로를 메꾸게 한다.
+    //
+    // 솎는 기준(5m / 4초)은 mission.js 와 같게 맞췄다. 그쪽에서 어차피 그 기준으로
+    // 걸러내므로 더 촘촘히 모아 둘 이유가 없다.
+
+    private static final int TRAIL_MAX = 20000;
+    private static final double TRAIL_MIN_DISTANCE_M = 5;
+    private static final long TRAIL_MIN_INTERVAL_MS = 4000;
+
+    private static final class Fix {
+        final String id;
+        final String name;
+        final double lat;
+        final double lng;
+        final double alt; // 없으면 NaN
+        final int acc;
+        final long ts;
+
+        Fix(String id, String name, double lat, double lng, double alt, int acc, long ts) {
+            this.id = id;
+            this.name = name;
+            this.lat = lat;
+            this.lng = lng;
+            this.alt = alt;
+            this.acc = acc;
+            this.ts = ts;
+        }
+    }
+
+    private static final java.util.ArrayDeque<Fix> trail = new java.util.ArrayDeque<>();
+    // 대원별로 마지막에 남긴 점. 솎는 기준을 판단하는 데 쓴다.
+    private static final java.util.HashMap<String, Fix> trailLast = new java.util.HashMap<>();
+
+    /** 위치 하나를 보관 대상으로 넣는다. 위치 콜백과 MQTT 수신 스레드가 함께 부르므로 동기화한다. */
+    private static synchronized void remember(String id, String name,
+                                             double lat, double lng, double alt, int acc, long ts) {
+        if (id == null || id.isEmpty()) return;
+        if (Double.isNaN(lat) || Double.isNaN(lng)) return;
+
+        Fix prev = trailLast.get(id);
+        if (prev != null) {
+            if (ts <= prev.ts) return; // 순서가 뒤집힌 것은 버린다
+            boolean moved = metersBetween(prev.lat, prev.lng, lat, lng) >= TRAIL_MIN_DISTANCE_M;
+            boolean waited = ts - prev.ts >= TRAIL_MIN_INTERVAL_MS;
+            if (!moved && !waited) return;
+        }
+
+        Fix fix = new Fix(id, name == null ? "" : name, lat, lng, alt, acc, ts);
+        trail.addLast(fix);
+        trailLast.put(id, fix);
+        while (trail.size() > TRAIL_MAX) trail.pollFirst();
+    }
+
+    /** 받은 위치 메시지에서 값을 뽑아 보관한다. */
+    private void rememberIncoming(String json) {
+        String senderId = TeamCrypto.extract(json, "id");
+        if (senderId == null || senderId.equals(clientId)) return; // 내 것은 위치 콜백에서 이미 넣었다
+
+        Double lat = asNumber(TeamCrypto.extract(json, "lat"));
+        Double lng = asNumber(TeamCrypto.extract(json, "lng"));
+        if (lat == null || lng == null) return;
+
+        Double alt = asNumber(TeamCrypto.extract(json, "alt"));
+        Double acc = asNumber(TeamCrypto.extract(json, "acc"));
+        Double ts = asNumber(TeamCrypto.extract(json, "ts"));
+
+        String name = TeamCrypto.extract(json, "name");
+        remember(senderId, name, lat, lng,
+                alt == null ? Double.NaN : alt,
+                acc == null ? 0 : (int) Math.round(acc),
+                ts == null ? System.currentTimeMillis() : (long) (double) ts);
+    }
+
+    /**
+     * 지정한 시각 이후에 모아 둔 위치를 JSON 배열로 돌려준다.
+     * 웹 화면이 앞으로 나올 때와 임무를 끝낼 때 가져간다.
+     */
+    static synchronized String trailSince(long since) {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append('[');
+        boolean first = true;
+        for (Fix f : trail) {
+            if (f.ts <= since) continue;
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"id\":\"").append(escape(f.id)).append("\",")
+                    .append("\"name\":\"").append(escape(f.name)).append("\",")
+                    .append("\"lat\":").append(round6(f.lat)).append(',')
+                    .append("\"lng\":").append(round6(f.lng)).append(',')
+                    .append("\"acc\":").append(f.acc).append(',')
+                    .append("\"alt\":")
+                    .append(Double.isNaN(f.alt) ? "null" : String.valueOf(Math.round(f.alt)))
+                    .append(",\"ts\":").append(f.ts).append('}');
+        }
+        return sb.append(']').toString();
+    }
+
+    /** 팀에서 나갈 때 보관한 경로도 버린다. 다음 임무에 섞이면 안 된다. */
+    private static synchronized void clearTrail() {
+        trail.clear();
+        trailLast.clear();
+    }
+
+    private static Double asNumber(String text) {
+        if (text == null || text.isEmpty() || "null".equals(text)) return null;
+        try {
+            return Double.valueOf(text);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 두 좌표 사이 거리(m). 솎는 기준 판단용이라 구면 근사로 충분하다. */
+    private static double metersBetween(double lat1, double lng1, double lat2, double lng2) {
+        double r = 6371000;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLng = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
     }
 
     private static double round6(double value) {

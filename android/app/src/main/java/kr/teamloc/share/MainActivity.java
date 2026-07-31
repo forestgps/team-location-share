@@ -1117,6 +1117,25 @@ public class MainActivity extends AppCompatActivity {
             MainActivity.this.startService(intent);
         }
 
+        /**
+         * 화면이 꺼져 있는 동안 서비스가 모아 둔 위치를 돌려준다.
+         *
+         * 웹 화면은 앱이 뒤로 가면 멈춘다. 그래서 그동안의 경로가 비고, 돌아왔을 때
+         * 한 점만 찍혀 직선으로 이어져 버린다. 웹이 이걸 가져가 경로를 메꾼다.
+         *
+         * @param sinceMs 이 시각 이후의 것만 준다(밀리초). 문자열로 받아 정밀도 손실을 피한다.
+         */
+        @JavascriptInterface
+        public String trailSince(String sinceMs) {
+            long since = 0;
+            try {
+                since = Long.parseLong(String.valueOf(sinceMs).trim());
+            } catch (Exception ignored) {
+                /* 잘못된 값이면 전부 준다 */
+            }
+            return TrackerService.trailSince(since);
+        }
+
         @JavascriptInterface
         public boolean isTracking() {
             return TrackerService.isTrackingLocation();
