@@ -58,6 +58,20 @@ public class TrackerService extends Service {
     private static final long LOCATION_MIN_INTERVAL_MS = 5000;
     private static final float LOCATION_MIN_DISTANCE_M = 5f;
 
+    // 네트워크(기지국·와이파이) 측위는 GPS 가 없을 때를 위한 예비다. 오차가 수백 미터라
+    // 촘촘히 받을 이유가 없다. 자주 받으면 그만큼 튀는 값이 자주 들어온다.
+    private static final long NETWORK_MIN_INTERVAL_MS = 30000;
+    private static final float NETWORK_MIN_DISTANCE_M = 50f;
+
+    // 튀는 위치를 걸러내는 기준. mission.js 의 acceptFix 와 같은 값이다.
+    // 한쪽만 바꾸면 화면이 켜져 있을 때와 꺼져 있을 때 경로가 달라진다.
+    private static final float FIX_GOOD_ACCURACY_M = 50f;
+    private static final float FIX_MAX_ACCURACY_M = 200f;
+    private static final float FIX_STALE_MAX_ACCURACY_M = 1000f;
+    private static final float FIX_ACCURACY_SLACK_M = 30f;
+    private static final long FIX_STALE_AFTER_MS = 90000;
+    private static final double FIX_MAX_SPEED_MPS = 55;
+
     private static volatile boolean running = false;
 
     private LocationManager locationManager;
@@ -177,12 +191,19 @@ public class TrackerService extends Service {
     private final LocationListener locationListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
+            // 튀는 값은 여기서 끝낸다.
+            //
+            // 화면이 꺼지면 GPS 갱신이 뜸해지고 그 빈자리를 기지국·와이파이 측위가 채운다.
+            // 예전에는 그걸 그대로 받아 lastLocation 에 넣고 팀에 보냈다. 그래서 화면을
+            // 다시 켜면 몇백 미터씩 튄 경로가 그려졌다.
+            if (!acceptFix(location)) return;
+
             lastLocation = location;
             // 화면이 꺼져 있는 동안에도 임무 경로가 이어지도록 따로 모아 둔다.
             remember(clientId, callsign,
                     location.getLatitude(), location.getLongitude(),
                     location.hasAltitude() ? location.getAltitude() : Double.NaN,
-                    Math.round(location.getAccuracy()),
+                    location.hasAccuracy() ? Math.round(location.getAccuracy()) : -1,
                     System.currentTimeMillis());
             publishIfDue(false);
         }
@@ -207,16 +228,82 @@ public class TrackerService extends Service {
                         LOCATION_MIN_INTERVAL_MS, LOCATION_MIN_DISTANCE_M, locationListener,
                         Looper.getMainLooper());
             }
-            // 실내에서 GPS 가 잡히지 않을 때를 대비해 네트워크 위치도 함께 받는다.
+            // 실내에서 GPS 가 잡히지 않을 때를 대비해 네트워크 위치도 받되, 뜸하게 받는다.
+            // 오차가 큰 값이라 예비용이다. acceptFix 가 GPS 값이 있는 동안에는 걸러 낸다.
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,
-                        LOCATION_MIN_INTERVAL_MS, LOCATION_MIN_DISTANCE_M, locationListener,
+                        NETWORK_MIN_INTERVAL_MS, NETWORK_MIN_DISTANCE_M, locationListener,
                         Looper.getMainLooper());
             }
         } catch (SecurityException e) {
             Log.e(TAG, "location permission missing", e);
             updateNotification(getString(R.string.tracking_no_permission));
         }
+    }
+
+    /** 방금 받은 내 위치를 믿어도 되는지. 직전에 받아들인 위치와 비교한다. */
+    private boolean acceptFix(Location next) {
+        if (next == null) return false;
+
+        double acc = next.hasAccuracy() ? next.getAccuracy() : -1;
+        Location prev = lastLocation;
+
+        if (prev == null) {
+            return acceptFix(0, 0, -1, 0, next.getLatitude(), next.getLongitude(), acc, 1);
+        }
+
+        return acceptFix(prev.getLatitude(), prev.getLongitude(),
+                prev.hasAccuracy() ? prev.getAccuracy() : -1, prev.getTime(),
+                next.getLatitude(), next.getLongitude(), acc, next.getTime());
+    }
+
+    /**
+     * 튀는 위치를 걸러내는 기준. 판단 순서까지 mission.js 의 acceptFix 와 같게 맞췄다.
+     * 한쪽만 바꾸면 화면이 켜져 있을 때와 꺼져 있을 때 경로가 달라진다.
+     *
+     * 정밀한 값을 속도 검사보다 먼저 통과시키는 게 중요하다. 절전 중에는 마지막 위치를
+     * 그대로 다시 보내기도 해서, 비교 대상이 낡았을 뿐인데 "갈 수 없는 속도" 로 보이는
+     * 경우가 있다. 그때 새 값을 버리면 진짜 위치를 놓친다.
+     *
+     * @param prevTs 앞선 위치의 시각. 앞선 위치가 없으면 0 이하를 넘긴다.
+     * @param acc    오차 반경(m). 알 수 없으면 음수를 넘긴다. prevAcc 도 같다.
+     */
+    private static boolean acceptFix(double prevLat, double prevLng, double prevAcc, long prevTs,
+                                     double lat, double lng, double acc, long ts) {
+        if (Double.isNaN(lat) || Double.isNaN(lng)) return false;
+
+        // 첫 위치. 비교할 게 없으니 기준을 눕힌다. 추적을 막 시작한 시점에는 GPS 가
+        // 잡히기 전이라 기지국 측위부터 들어오는데, 그것마저 버리면 한동안 아무 값도 없다.
+        if (prevTs <= 0) return acc < 0 || acc <= FIX_STALE_MAX_ACCURACY_M;
+
+        long gap = ts - prevTs;
+        if (gap < 0) return false; // 순서가 뒤집힌 값
+
+        boolean starved = gap >= FIX_STALE_AFTER_MS;
+
+        // 1. 어떤 경우에도 넘지 못하는 선.
+        double cap = starved ? FIX_STALE_MAX_ACCURACY_M : FIX_MAX_ACCURACY_M;
+        if (acc >= 0 && acc > cap) return false;
+
+        // 2. 정밀한 값은 무조건 받는다.
+        if (acc >= 0 && acc <= FIX_GOOD_ACCURACY_M) return true;
+
+        // 4. 오래 굶었으면 거친 값이라도 받는다.
+        if (starved) return true;
+
+        // 3. 어중간한 값은 따져 본다. 먼저 갈 수 없는 속도인지.
+        if (gap > 0) {
+            double moved = metersBetween(prevLat, prevLng, lat, lng);
+            // 두 값의 오차 범위가 겹치는 만큼은 실제로 움직인 게 아닐 수 있다. 빼고 본다.
+            double slack = (acc < 0 ? 0 : acc) + (prevAcc < 0 ? 0 : prevAcc);
+            if (Math.max(0, moved - slack) / (gap / 1000.0) > FIX_MAX_SPEED_MPS) return false;
+        }
+
+        if (acc < 0) return true;
+
+        // 앞선 값보다 크게 나빠졌으면 버린다.
+        double base = prevAcc < 0 ? FIX_GOOD_ACCURACY_M : prevAcc;
+        return acc <= base + FIX_ACCURACY_SLACK_M;
     }
 
     /** 위치 변화가 없어도 주기적으로 한 번씩 올려서 팀원 화면에서 사라지지 않게 한다. */
@@ -567,6 +654,14 @@ public class TrackerService extends Service {
             if (!moved && !waited) return;
         }
 
+        // 튀는 값은 보관하지 않는다. 내 위치는 이미 걸러져서 오지만, 다른 대원이 보낸
+        // 위치는 여기가 첫 관문이다. 구버전 앱이 섞여 있으면 거친 값이 그대로 날아온다.
+        if (!acceptFix(prev == null ? 0 : prev.lat, prev == null ? 0 : prev.lng,
+                prev == null ? -1 : prev.acc, prev == null ? 0 : prev.ts,
+                lat, lng, acc, ts)) {
+            return;
+        }
+
         Fix fix = new Fix(id, name == null ? "" : name, lat, lng, alt, acc, ts);
         trail.addLast(fix);
         trailLast.put(id, fix);
@@ -587,9 +682,11 @@ public class TrackerService extends Service {
         Double ts = asNumber(TeamCrypto.extract(json, "ts"));
 
         String name = TeamCrypto.extract(json, "name");
+        // 오차를 모를 때는 -1 이다. 0 으로 두면 "오차 없는 완벽한 값" 이 되어
+        // 그다음 위치가 전부 "더 나빠졌다" 고 걸러진다.
         remember(senderId, name, lat, lng,
                 alt == null ? Double.NaN : alt,
-                acc == null ? 0 : (int) Math.round(acc),
+                acc == null ? -1 : (int) Math.round(acc),
                 ts == null ? System.currentTimeMillis() : (long) (double) ts);
     }
 
@@ -609,7 +706,8 @@ public class TrackerService extends Service {
                     .append("\"name\":\"").append(escape(f.name)).append("\",")
                     .append("\"lat\":").append(round6(f.lat)).append(',')
                     .append("\"lng\":").append(round6(f.lng)).append(',')
-                    .append("\"acc\":").append(f.acc).append(',')
+                    // 오차를 모르면 null 로 내보낸다. 음수를 그대로 주면 웹이 숫자로 읽는다.
+                    .append("\"acc\":").append(f.acc < 0 ? "null" : String.valueOf(f.acc)).append(',')
                     .append("\"alt\":")
                     .append(Double.isNaN(f.alt) ? "null" : String.valueOf(Math.round(f.alt)))
                     .append(",\"ts\":").append(f.ts).append('}');

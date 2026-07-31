@@ -69,6 +69,9 @@
     sweepTimer: null,
     wakeLock: null,
     members: Object.create(null),
+    // 대원별로 마지막에 "믿을 만하다" 고 판단한 위치. 튀는 값을 걸러내는 기준점이다.
+    // id -> { lat, lng, ts, acc }
+    fixes: Object.create(null),
     recorder: null, // 임무 진행 중일 때만 존재
     clockTimer: null,
     pendingMission: null, // 저장 창에 올라와 있는 임무
@@ -451,9 +454,19 @@
     // 앱이 다시 앞으로 나오면, 멈춰 있던 동안의 경로를 서비스에서 가져와 메꾼다.
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState !== "visible") return;
-      var added = absorbBackgroundTrail();
-      if (added > 0) {
-        toast("화면이 꺼져 있던 동안의 이동 경로 " + added + "개 지점을 이어 붙였습니다.", 5000);
+      var result = absorbBackgroundTrail();
+      if (result.added > 0) {
+        toast(
+          "화면이 꺼져 있던 동안의 이동 경로 " + result.added + "개 지점을 이어 붙였습니다." +
+            (result.dropped > 0 ? " 오차가 큰 " + result.dropped + "개는 제외했습니다." : ""),
+          5000
+        );
+      } else if (result.dropped > 0) {
+        toast(
+          "화면이 꺼져 있던 동안의 위치 " + result.dropped +
+            "개가 오차가 너무 커서 경로에 넣지 않았습니다. GPS 가 잡히지 않는 곳이었을 수 있습니다.",
+          7000
+        );
       }
     });
 
@@ -3116,6 +3129,10 @@
     }
 
     if (msg.type === "pos" && isFiniteNumber(msg.lat) && isFiniteNumber(msg.lng)) {
+      // 보낸 대원의 기기에서 걸러졌어야 하지만, 구버전 앱이 섞여 있을 수 있다.
+      // 받는 쪽에서도 같은 기준으로 한 번 더 본다. 튀는 값은 남의 마커와 경로도 망친다.
+      if (!acceptFix(msg.id, msg.lat, msg.lng, Date.now(), msg.acc)) return;
+
       upsertMember({
         id: msg.id,
         name: typeof msg.name === "string" && msg.name ? msg.name : "대원-" + msg.id.slice(0, 4),
@@ -3132,10 +3149,51 @@
     }
   }
 
+  /**
+   * 이 위치를 믿어도 되는지 판단하고, 믿는다면 기준점을 갱신한다.
+   *
+   * 기준은 mission.js 의 acceptFix 하나로 통일한다. 내 위치, 팀원이 보낸 위치,
+   * 네이티브 서비스가 모아 둔 위치가 모두 같은 문을 지나야 한다. 한 곳만 열어 두면
+   * 거기서 튄 값이 들어와 경로를 망친다.
+   */
+  function acceptFix(id, lat, lng, ts, acc) {
+    var fix = { lat: lat, lng: lng, ts: ts, acc: knownAccuracy(acc) };
+    var prev = state.fixes[id] || null;
+
+    if (!RtlocMission.acceptFix(prev, fix)) return false;
+
+    // 백그라운드 경로를 흡수할 때는 과거 위치가 뒤늦게 들어온다.
+    // 기준점은 항상 가장 최근 것으로 둔다.
+    if (!prev || fix.ts >= prev.ts) state.fixes[id] = fix;
+    return true;
+  }
+
+  /**
+   * 쓸 수 있는 오차 값인지 정리한다. 0 이하는 "모른다" 로 본다.
+   * 구버전 앱이 오차를 모를 때 0 을 보내는데, 그걸 그대로 믿으면 "오차 없는 완벽한 값" 이
+   * 되어 그다음 위치가 전부 "더 나빠졌다" 고 걸러진다.
+   */
+  function knownAccuracy(acc) {
+    return isFiniteNumber(acc) && acc > 0 ? acc : null;
+  }
+
   // ---------- 위치 추적 ----------
   function startTracking() {
     state.watchId = navigator.geolocation.watchPosition(
       function (position) {
+        // 화면을 다시 켠 직후에는 기지국 측위가 GPS 보다 먼저 온다.
+        // 오차가 수백 미터인 그 값을 그대로 쓰면 내 마커가 엉뚱한 곳으로 튄다.
+        var fixTime = isFiniteNumber(position.timestamp) ? position.timestamp : Date.now();
+        if (!acceptFix(
+              state.clientId,
+              position.coords.latitude,
+              position.coords.longitude,
+              fixTime,
+              position.coords.accuracy
+            )) {
+          return;
+        }
+
         state.lastPosition = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
@@ -3354,7 +3412,12 @@
 
     var touched = Object.create(null);
     var added = 0;
+    var dropped = 0;
     var newest = since;
+
+    // 여기서 들어오는 건 과거 위치다. 지금 시각 기준의 state.fixes 와 비교하면 전부
+    // "순서가 뒤집혔다" 고 판단되므로, 이 구간만의 기준점을 따로 이어 나간다.
+    var chain = Object.create(null);
 
     list.forEach(function (fix) {
       if (!fix || !fix.id) return;
@@ -3364,7 +3427,24 @@
       // 이미 그 대원의 마지막 점보다 오래된 것은 버린다.
       // 복귀 직후 들어온 실시간 위치가 먼저 기록됐을 수 있다.
       var track = state.recorder.trackOf(fix.id);
-      if (track && track.points.length && fix.ts <= track.points[track.points.length - 1][2]) return;
+      var lastPoint = track && track.points.length ? track.points[track.points.length - 1] : null;
+      if (lastPoint && fix.ts <= lastPoint[2]) return;
+
+      // 오차가 큰 값은 넣지 않는다. 화면이 꺼져 있는 동안 GPS 가 뜸해지면 기지국 측위가
+      // 그 자리를 채우는데, 그것까지 이어 붙이면 가지도 않은 곳을 다녀온 선이 된다.
+      if (!chain[fix.id]) {
+        // 이 대원의 첫 점. 이미 기록된 마지막 점을 기준으로 삼는다(그 점의 오차는 모른다).
+        chain[fix.id] = lastPoint
+          ? { lat: lastPoint[0], lng: lastPoint[1], ts: lastPoint[2], acc: null }
+          : null;
+      }
+
+      var candidate = { lat: fix.lat, lng: fix.lng, ts: fix.ts, acc: knownAccuracy(fix.acc) };
+      if (!RtlocMission.acceptFix(chain[fix.id], candidate)) {
+        dropped++;
+        return;
+      }
+      chain[fix.id] = candidate;
 
       if (state.recorder.addPoint(fix.id, fix.name || "대원", fix.lat, fix.lng, fix.ts)) {
         touched[fix.id] = true;
@@ -3379,7 +3459,7 @@
       if (member) drawTrail(member);
     });
 
-    return added;
+    return { added: added, dropped: dropped };
   }
 
   /** 기록된 경로를 지도 위 선으로 반영한다. */
