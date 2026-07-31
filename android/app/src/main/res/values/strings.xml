@@ -9,13 +9,18 @@
     <string name="tracking_channel">위치 추적</string>
     <string name="message_channel">팀 메시지</string>
     <string name="tracking_starting">위치 추적을 준비하는 중…</string>
-    <string name="messaging_active">팀 메시지를 받는 중 (위치 추적 꺼짐)</string>
+    <string name="messaging_active">팀 메시지를 받는 중 (위치 권한이 없어 추적 불가)</string>
     <string name="tracking_active">화면이 꺼져도 팀에 위치를 보내는 중</string>
     <string name="tracking_offline">브로커에 연결하지 못했습니다. 재시도 중…</string>
-    <string name="tracking_no_permission">위치 권한이 없어 추적할 수 없습니다.</string>
-    <string name="tracking_stop">중지</string>
+    <string name="tracking_no_permission">위치 권한이 없어 추적할 수 없습니다. 앱을 열어 확인해 주세요.</string>
 
-    <string name="need_background_location">화면이 꺼져도 위치를 보내려면 위치 권한을 "항상 허용"으로 설정해 주세요.</string>
+    <!--
+      기기가 getBackgroundPermissionOptionLabel() 로 실제 문구를 알려 주면 그걸 쓴다.
+      알려 주지 않는 기기(안드로이드 10 이하)에서만 이 문구가 쓰인다.
+    -->
+    <string name="always_allow_fallback">항상 허용</string>
+    <string name="always_allow_settings_hint">권한 → 위치 → "%1$s" 를 선택해 주세요.</string>
+    <string name="settings_open_failed">설정 화면을 열 수 없습니다. 휴대전화 설정 → 앱 → 팀 위치 공유 에서 직접 변경해 주세요.</string>
     <string name="file_chooser_failed">이 기기에서 파일 선택 창을 열 수 없습니다. 갤러리 앱이 비활성화되어 있는지 확인해 주세요.</string>
     <string name="attach_copy_failed">파일 %1$d개를 앱으로 가져오지 못했습니다(앱 단계 실패). 다른 방법으로 한 번 더 시도합니다.</string>
     <string name="attach_interrupted">파일을 고르는 동안 앱이 다시 시작돼 첨부가 취소되었습니다. 메모를 다시 열고 첨부해 주세요.</string>

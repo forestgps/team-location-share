@@ -814,11 +814,58 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
-/* 화면 꺼짐 추적 (안드로이드 앱에서만 보인다) */
-#bg-btn.on {
-  border-color: #2d4a3c;
-  color: var(--ok);
+/* 화면 꺼짐 추적 권한 안내 (안드로이드 앱에서만 뜬다) */
+.perm-step {
+  margin-top: 16px;
+  padding: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.perm-step[hidden] { display: none; }
+
+.perm-step h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.perm-step .help {
+  margin: 0 0 10px;
+}
+
+.perm-state {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
   font-weight: 700;
+}
+
+.perm-state--bad {
+  border-color: #5a3b2d;
+  color: var(--warn);
+}
+
+.perm-guide {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--muted);
+}
+
+.perm-guide strong {
+  color: var(--text);
+}
+
+.perm-step .primary {
+  width: 100%;
+  padding: 11px 14px;
+  font-size: 13px;
 }
 
 /* ---------- 팀 메시지 ---------- */

@@ -11,10 +11,12 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.DownloadListener;
@@ -48,10 +50,14 @@ import androidx.core.content.FileProvider;
  * 화면 안의 지도/메모/임무 기능은 전부 웹 코드가 그대로 처리한다. 네이티브가 하는 일은 셋뿐이다.
  *   1. 위치·카메라 권한을 안드로이드에서 받아 WebView 에 넘겨준다
  *   2. 파일 선택(사진/동영상 첨부)을 중개한다
- *   3. 화면이 꺼져도 위치가 계속 올라가도록 TrackerService 를 켜고 끈다
+ *   3. 화면이 꺼져도 위치가 계속 올라가도록 TrackerService 를 켠다
  *   4. 웹이 만든 파일(임무 영상, 임무 기록)을 다운로드 폴더에 써 준다
  *
- * 웹 코드는 window.AndroidBridge 가 있는지 보고 백그라운드 추적 UI 를 노출한다.
+ * 화면 꺼짐 추적은 켜고 끄는 대상이 아니다. 팀에 입장하면 항상 켜진다.
+ * 대신 그게 실제로 동작하려면 사용자가 직접 내줘야 하는 두 가지가 있다.
+ *   - 위치 권한 "항상 허용" (안드로이드 11 부터는 시스템 창에서 고를 수 없어 설정으로 보내야 한다)
+ *   - 배터리 사용량 최적화 제외 (없으면 절전 상태에서 위치가 끊긴다)
+ * 웹 화면이 이 두 가지 상태를 브리지로 물어보고 안내 창을 띄운다.
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -264,22 +270,118 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * 화면이 꺼진 상태의 추적에는 "항상 허용" 위치 권한이 필요하다.
-     * 안드로이드 규칙상 기본 위치 권한을 먼저 받은 뒤 따로 요청해야 한다.
+     * 화면이 꺼진 상태의 추적에는 "항상 허용" 위치 권한이 있어야 한다.
+     * 안드로이드 9 이하에는 이런 구분이 없어 기본 위치 권한만으로 된다.
      */
-    private boolean ensureBackgroundLocation() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true;
+    private boolean hasAlwaysLocation() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return hasForegroundLocation();
+        return hasForegroundLocation()
+                && ContextCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
-            return true;
+    private boolean hasForegroundLocation() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * 이 기기의 설정 화면에서 "항상 허용" 항목이 실제로 뭐라고 적혀 있는지.
+     *
+     * 제조사와 안드로이드 버전에 따라 문구가 다르다. 시스템이 알려 주는 이름을 그대로
+     * 써야 안내한 대로 눌러 볼 수 있다. 알 수 없으면 가장 흔한 문구를 쓴다.
+     */
+    private String alwaysAllowLabel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                CharSequence label = getPackageManager().getBackgroundPermissionOptionLabel();
+                if (label != null && label.length() > 0) return label.toString();
+            } catch (Exception ignored) {
+                /* 기기가 알려 주지 않는 경우 */
+            }
+        }
+        return getString(R.string.always_allow_fallback);
+    }
+
+    /**
+     * "항상 허용" 을 받아 낸다.
+     *
+     * 안드로이드 10 까지는 시스템 창에 "항상 허용" 항목이 있어서 그대로 물어볼 수 있다.
+     * 안드로이드 11 부터는 그 항목이 시스템 창에서 빠졌다. 설정 화면으로 보내는 것이
+     * 유일한 방법이다(구글 공식 안내).
+     */
+    private void requestAlwaysLocation() {
+        // 기본 위치 권한이 먼저 있어야 "항상 허용" 을 요청할 수 있다.
+        if (!hasForegroundLocation()) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_PERMISSIONS);
+            return;
         }
 
-        Toast.makeText(this, R.string.need_background_location, Toast.LENGTH_LONG).show();
-        ActivityCompat.requestPermissions(this,
-                new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION},
-                REQ_BACKGROUND_LOCATION);
-        return false;
+        if (hasAlwaysLocation()) return;
+
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION},
+                    REQ_BACKGROUND_LOCATION);
+            return;
+        }
+
+        openAppSettings();
+    }
+
+    /** 이 앱의 설정 화면을 연다. 여기서 권한 → 위치 → "항상 허용" 으로 들어간다. */
+    private void openAppSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+            Toast.makeText(this,
+                    getString(R.string.always_allow_settings_hint, alwaysAllowLabel()),
+                    Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Log.w(TAG, "설정 화면을 열 수 없음", e);
+            Toast.makeText(this, R.string.settings_open_failed, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * 배터리 사용량 최적화 대상인지.
+     *
+     * 최적화 대상이면 절전(Doze) 상태에서 위치 갱신 주기가 늘어나거나 아예 끊긴다.
+     * 포그라운드 서비스로 돌려도 제조사 절전 정책까지 막지는 못한다.
+     */
+    private boolean isBatteryRestricted() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false;
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        return power != null && !power.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    /**
+     * 배터리 최적화에서 빼 달라고 요청한다.
+     *
+     * 스토어에 올린 앱이 아니라 이 요청을 직접 띄울 수 있다. 사용자가 확인 창에서
+     * 결정하며, 거부해도 앱은 그대로 쓸 수 있다.
+     */
+    @SuppressLint("BatteryLife")
+    private void requestBatteryExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        if (!isBatteryRestricted()) return;
+
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        } catch (Exception e) {
+            Log.w(TAG, "배터리 최적화 예외 창을 열 수 없음", e);
+        }
+
+        // 기기에 따라 위 창이 막혀 있다. 그때는 목록 화면이라도 열어 준다.
+        try {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (Exception e) {
+            Toast.makeText(this, R.string.settings_open_failed, Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override
@@ -287,10 +389,23 @@ public class MainActivity extends AppCompatActivity {
                                            @NonNull int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
 
-        if (requestCode == REQ_BACKGROUND_LOCATION && results.length > 0
-                && results[0] == PackageManager.PERMISSION_GRANTED) {
-            // 권한을 받은 뒤 보류해 둔 요청을 이어서 실행한다.
+        boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+
+        if (requestCode == REQ_BACKGROUND_LOCATION && granted) {
+            // "항상 허용" 을 받았다. 위치까지 올리도록 서비스를 다시 걸어 준다.
             startService(true);
+            return;
+        }
+
+        // 기본 위치 권한을 이제 막 받았다면 "항상 허용" 이 그다음 단계다.
+        //
+        // 안드로이드 10 에서만 여기서 이어 묻는다. 시스템 창 한 번으로 끝나기 때문이다.
+        // 안드로이드 11 부터는 설정 화면으로 나가야 하는데, 앱을 켜자마자 설정으로
+        // 끌고 가는 것은 무례하다. 그쪽은 임무 시작 때 안내 창에서 처리한다.
+        if (requestCode == REQ_PERMISSIONS
+                && Build.VERSION.SDK_INT == Build.VERSION_CODES.Q
+                && hasForegroundLocation() && !hasAlwaysLocation()) {
+            requestAlwaysLocation();
         }
     }
 
@@ -824,10 +939,13 @@ public class MainActivity extends AppCompatActivity {
     /**
      * 서비스를 시작한다.
      * @param withLocation true 면 위치까지 올린다. false 면 메시지 수신만 한다.
+     *
+     * "항상 허용" 이 없어도 그냥 시작한다. 예전에는 여기서 멈춰 세웠는데, 그러면 권한을
+     * 미루는 동안 메시지 알림까지 안 왔다. 권한이 없으면 서비스가 알림 표시줄에
+     * 그 사실을 적어 두고, 웹 화면이 안내 창으로 다시 알려 준다.
      */
     private void startService(boolean withLocation) {
         if (pendingTeam == null || pendingSecret == null || pendingClientId == null) return;
-        if (withLocation && !ensureBackgroundLocation()) return;
 
         Intent intent = new Intent(this, TrackerService.class)
                 .setAction(TrackerService.ACTION_START)
@@ -1139,6 +1257,65 @@ public class MainActivity extends AppCompatActivity {
         @JavascriptInterface
         public boolean isTracking() {
             return TrackerService.isTrackingLocation();
+        }
+
+        // ---------- 화면 꺼짐 추적에 필요한 권한 ----------
+        //
+        // 추적 자체는 늘 켜져 있다. 하지만 사용자가 내줘야 하는 두 가지가 없으면
+        // 화면이 꺼진 뒤 위치가 끊긴다. 웹 화면이 임무 시작 때 이걸 확인해 안내한다.
+
+        /** 위치 권한이 "항상 허용" 인지. */
+        @JavascriptInterface
+        public boolean hasAlwaysLocation() {
+            return MainActivity.this.hasAlwaysLocation();
+        }
+
+        /** 이 기기에서 "항상 허용" 항목이 실제로 어떻게 적혀 있는지. 안내 문구에 그대로 쓴다. */
+        @JavascriptInterface
+        public String alwaysAllowLabel() {
+            return MainActivity.this.alwaysAllowLabel();
+        }
+
+        /**
+         * "항상 허용" 을 받아 낸다. 안드로이드 11 부터는 설정 화면이 열린다
+         * (시스템 창에서 고를 수 없게 바뀌었다).
+         */
+        @JavascriptInterface
+        public void requestAlwaysLocation() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.requestAlwaysLocation();
+                }
+            });
+        }
+
+        /** 이 앱의 설정 화면을 연다. */
+        @JavascriptInterface
+        public void openAppSettings() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.openAppSettings();
+                }
+            });
+        }
+
+        /** 배터리 최적화 대상이라 절전 상태에서 위치가 끊길 수 있는지. */
+        @JavascriptInterface
+        public boolean isBatteryRestricted() {
+            return MainActivity.this.isBatteryRestricted();
+        }
+
+        /** 배터리 최적화에서 빼 달라는 시스템 확인 창을 띄운다. */
+        @JavascriptInterface
+        public void requestBatteryExemption() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.requestBatteryExemption();
+                }
+            });
         }
 
         /** 메시지 수신 서비스가 돌고 있는지. */

@@ -119,8 +119,17 @@
     missionStartBtn: document.getElementById("mission-start-btn"),
     missionEndBtn: document.getElementById("mission-end-btn"),
     missionClock: document.getElementById("mission-clock"),
-    bgBtn: document.getElementById("bg-btn"),
     updateBtn: document.getElementById("update-btn"),
+    permModal: document.getElementById("perm-modal"),
+    permTitle: document.getElementById("perm-title"),
+    permLocation: document.getElementById("perm-location"),
+    permLocationState: document.getElementById("perm-location-state"),
+    permLocationBtn: document.getElementById("perm-location-btn"),
+    permBattery: document.getElementById("perm-battery"),
+    permBatteryState: document.getElementById("perm-battery-state"),
+    permBatteryBtn: document.getElementById("perm-battery-btn"),
+    permRecheck: document.getElementById("perm-recheck"),
+    permClose: document.getElementById("perm-close"),
     historyBtn: document.getElementById("history-btn"),
     chatBtn: document.getElementById("chat-btn"),
     chatUnread: document.getElementById("chat-unread"),
@@ -1762,26 +1771,13 @@
         at: state.recorder.startedAt
       });
       toast("임무를 시작했습니다. 대원들의 이동 경로를 기록합니다.");
-      warnIfBackgroundTrackingOff();
     } else {
       toast((remote.name || "대원") + " 님이 임무를 시작했습니다.", 5000);
-      warnIfBackgroundTrackingOff();
     }
-  }
 
-  /**
-   * 화면 꺼짐 추적이 꺼진 채로 임무를 하면 앱을 뒤로 보낸 구간이 통째로 빈다.
-   * 그때는 서비스가 위치를 받지 않으므로 나중에 메꿀 방법도 없다. 미리 알려 준다.
-   */
-  function warnIfBackgroundTrackingOff() {
-    var bridge = window.AndroidBridge;
-    if (!bridge || typeof bridge.isTracking !== "function") return; // 웹 브라우저
-    if (isBackgroundTracking()) return;
-
-    toast(
-      "화면 꺼짐 추적이 꺼져 있습니다. 앱을 뒤로 보내거나 화면을 끄면 그 구간 경로가 기록되지 않습니다.",
-      9000
-    );
+    // 화면을 끈 구간이 비지 않게, 임무를 시작할 때 권한 상태를 확인해 안내한다.
+    // 토스트로는 지나쳐 버리기 쉬워서 설정 방법까지 담은 창을 띄운다.
+    checkTrackingPermissions();
   }
 
   function endMission(isLocal) {
@@ -2599,17 +2595,45 @@
    * 브라우저는 화면이 꺼지면 위치 갱신을 멈춘다. 안드로이드 앱으로 실행한 경우에만
    * 네이티브 포그라운드 서비스가 대신 위치를 올릴 수 있다.
    * 그 서비스는 웹과 같은 대원 id 로 발행하므로 팀원 지도에서는 끊김 없이 이어진다.
+   *
+   * 켜고 끄는 버튼은 두지 않는다. 팀에 입장하면 항상 켜진다.
+   * 끌 수 있게 두면 꺼진 줄 모르고 임무를 하다가 그 구간 경로가 통째로 비는데,
+   * 그때는 서비스가 위치를 아예 받지 않았으므로 나중에 메꿀 방법도 없다.
    */
   function setupBackgroundTracking() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.startTracking !== "function") return; // 웹 브라우저
+
+    startBackgroundTracking();
+    setupUpdateButton(bridge);
+    setupPermissionDialog();
+
+    // 시스템이 서비스를 죽였거나, 권한을 받아 온 뒤라면 다시 살려야 한다.
+    // 화면을 보고 있을 때만 시도한다. 안드로이드 12 부터는 백그라운드에서
+    // 포그라운드 서비스를 시작할 수 없다.
+    function reassert() {
+      if (document.visibilityState !== "visible") return;
+      if (isBackgroundTracking()) return;
+      startBackgroundTracking();
+    }
+
+    document.addEventListener("visibilitychange", reassert);
+    setInterval(reassert, 60000);
+  }
+
+  /**
+   * 네이티브 서비스를 위치 추적까지 포함해 켠다. 이미 켜져 있으면 서비스가 알아서 넘어간다.
+   * 팀에 입장하면 곧바로 부르고, 그 뒤에는 꺼져 있는 걸 발견할 때마다 다시 부른다.
+   */
+  function startBackgroundTracking() {
     var bridge = window.AndroidBridge;
     if (!bridge || typeof bridge.startTracking !== "function") return; // 웹 브라우저
 
     // 자체 브로커의 아이디·암호를 서비스에도 알려 준다. 없으면 넘어간다.
     sendBrokerAuth(bridge);
 
-    // 앱에 들어오면 메시지 수신 서비스를 곧바로 켠다.
-    // 이게 켜져 있어야 앱을 보고 있지 않을 때도 메시지 팝업이 뜬다.
-    // 위치 권한과 무관하게 동작한다.
+    // 메시지 수신을 먼저 걸어 둔다. 구버전 앱은 "항상 허용" 이 없으면 위치 요청을
+    // 아예 무시해 버리는데, 그때도 메시지 알림은 살아 있어야 한다.
     if (typeof bridge.startMessaging === "function") {
       try {
         bridge.startMessaging(
@@ -2624,37 +2648,17 @@
       }
     }
 
-    el.bgBtn.hidden = false;
-    syncBackgroundButton();
-    setupUpdateButton(bridge);
-
-    el.bgBtn.addEventListener("click", function () {
-      var on = isBackgroundTracking();
-
-      if (on) {
-        bridge.stopTracking();
-        toast("화면 꺼짐 추적을 껐습니다. 이제 화면이 꺼지면 내 위치가 멈춥니다.", 5000);
-      } else {
-        sendBrokerAuth(bridge);
-        bridge.startTracking(
-          state.teamName,
-          state.secret || "",
-          state.callsign,
-          state.clientId,
-          el.broker.value.trim()
-        );
-        toast(
-          "화면 꺼짐 추적을 켰습니다. 위치 권한을 '항상 허용'으로 요청하면 승인해 주세요.",
-          7000
-        );
-      }
-
-      // 권한 창을 거친 뒤 상태가 바뀔 수 있어 잠시 후 다시 확인한다.
-      setTimeout(syncBackgroundButton, 1500);
-      setTimeout(syncBackgroundButton, 5000);
-    });
-
-    setInterval(syncBackgroundButton, 5000);
+    try {
+      bridge.startTracking(
+        state.teamName,
+        state.secret || "",
+        state.callsign,
+        state.clientId,
+        el.broker.value.trim()
+      );
+    } catch (e) {
+      /* 구버전 앱 */
+    }
   }
 
   /** 자체 브로커 자격을 네이티브 서비스에 넘긴다(구버전 앱에서는 조용히 넘어간다). */
@@ -2703,12 +2707,157 @@
     }
   }
 
-  function syncBackgroundButton() {
-    if (el.bgBtn.hidden) return;
-    var on = isBackgroundTracking();
-    el.bgBtn.setAttribute("aria-pressed", String(on));
-    el.bgBtn.classList.toggle("on", on);
-    el.bgBtn.textContent = "화면 꺼짐 추적: " + (on ? "켜짐" : "끄기");
+  // ---------- "항상 허용" 안내 창 (안드로이드 앱 전용) ----------
+  //
+  // 추적은 늘 켜져 있지만, 사용자가 직접 내줘야 하는 두 가지가 없으면 소용이 없다.
+  //   1. 위치 권한 "항상 허용" — 안드로이드 11 부터는 시스템 창에서 고를 수 없어 설정으로 가야 한다
+  //   2. 배터리 최적화 제외 — 절전 상태에서 위치 갱신이 늦어지거나 끊긴다
+  // 임무를 시작할 때 확인해서 부족한 것만 골라 안내한다. 토스트는 지나쳐 버리기 쉬워서
+  // 설정 방법과 바로 가는 버튼까지 담은 창을 쓴다.
+
+  function setupPermissionDialog() {
+    el.permLocationBtn.addEventListener("click", function () {
+      var bridge = window.AndroidBridge;
+      if (!bridge) return;
+      try {
+        if (typeof bridge.requestAlwaysLocation === "function") {
+          bridge.requestAlwaysLocation();
+        } else if (typeof bridge.openAppSettings === "function") {
+          bridge.openAppSettings();
+        } else {
+          toast("앱을 최신 버전으로 업데이트해 주세요.", 6000);
+        }
+      } catch (e) {
+        toast("설정 화면을 열 수 없습니다. 휴대전화 설정 → 앱 에서 직접 바꿔 주세요.", 7000);
+      }
+    });
+
+    el.permBatteryBtn.addEventListener("click", function () {
+      var bridge = window.AndroidBridge;
+      if (!bridge || typeof bridge.requestBatteryExemption !== "function") {
+        toast("앱을 최신 버전으로 업데이트해 주세요.", 6000);
+        return;
+      }
+      try {
+        bridge.requestBatteryExemption();
+      } catch (e) {
+        toast("설정 화면을 열 수 없습니다.", 5000);
+      }
+    });
+
+    el.permRecheck.addEventListener("click", function () {
+      closePermissionDialogIfDone(true);
+    });
+
+    el.permClose.addEventListener("click", function () {
+      el.permModal.hidden = true;
+      if (!hasAlwaysLocation()) {
+        toast(
+          "위치 권한이 “항상 허용”이 아닙니다. 화면을 끈 구간은 경로가 기록되지 않습니다.",
+          9000
+        );
+      }
+    });
+
+    // 설정 화면에 다녀오면 상태가 바뀌어 있다. 창이 열려 있으면 곧바로 갱신한다.
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      if (el.permModal.hidden) return;
+      closePermissionDialogIfDone(false);
+    });
+  }
+
+  /**
+   * 남은 설정이 없으면 창을 닫는다.
+   * @param {boolean} tellWhenIncomplete 아직 남았을 때도 알려 줄지("다시 확인" 을 누른 경우)
+   */
+  function closePermissionDialogIfDone(tellWhenIncomplete) {
+    if (refreshPermissionDialog()) {
+      if (tellWhenIncomplete) toast("아직 설정이 남아 있습니다.", 4000);
+      return;
+    }
+    el.permModal.hidden = true;
+    startBackgroundTracking(); // 권한이 생겼으니 위치 추적을 다시 걸어 준다
+    toast("설정이 끝났습니다. 이제 화면이 꺼져도 위치가 계속 올라갑니다.", 6000);
+  }
+
+  /** 앱이 알려 주는 "항상 허용" 여부. 웹 브라우저에서는 물어볼 수 없어 true 로 둔다. */
+  function hasAlwaysLocation() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.hasAlwaysLocation !== "function") return true;
+    try {
+      return !!bridge.hasAlwaysLocation();
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** 배터리 최적화 대상이라 절전 상태에서 위치가 끊길 수 있는지. */
+  function isBatteryRestricted() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.isBatteryRestricted !== "function") return false;
+    try {
+      return !!bridge.isBatteryRestricted();
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 이 기기의 설정 화면에서 "항상 허용" 항목이 실제로 뭐라고 적혀 있는지.
+   * 제조사마다 문구가 달라서, 시스템이 알려 주는 이름을 그대로 안내에 쓴다.
+   */
+  function alwaysAllowLabel() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.alwaysAllowLabel !== "function") return "항상 허용";
+    try {
+      var label = bridge.alwaysAllowLabel();
+      return label ? String(label) : "항상 허용";
+    } catch (e) {
+      return "항상 허용";
+    }
+  }
+
+  /** 임무를 시작할 때 부른다. 부족한 게 있으면 안내 창을 띄운다. */
+  function checkTrackingPermissions() {
+    var bridge = window.AndroidBridge;
+    if (!bridge || typeof bridge.startTracking !== "function") return; // 웹 브라우저
+
+    // 구버전 앱은 권한 상태를 물어볼 수 없다. 한 줄 알림만 띄운다.
+    if (typeof bridge.hasAlwaysLocation !== "function") {
+      if (!isBackgroundTracking()) {
+        toast(
+          "화면 꺼짐 추적이 켜지지 않았습니다. 위치 권한을 “항상 허용”으로 바꾸고, " +
+            "앱을 최신 버전으로 업데이트해 주세요.",
+          9000
+        );
+      }
+      return;
+    }
+
+    if (refreshPermissionDialog()) el.permModal.hidden = false;
+  }
+
+  /**
+   * 안내 창 내용을 지금 상태에 맞춘다.
+   * @returns {boolean} 아직 설정이 필요한 항목이 남아 있는지
+   */
+  function refreshPermissionDialog() {
+    var needLocation = !hasAlwaysLocation();
+    var needBattery = isBatteryRestricted();
+
+    var label = alwaysAllowLabel();
+    var slots = el.permModal.querySelectorAll(".perm-label");
+    for (var i = 0; i < slots.length; i++) slots[i].textContent = label;
+
+    el.permTitle.textContent = needLocation
+      ? "위치 권한을 “" + label + "”으로 바꿔 주세요"
+      : "배터리 최적화에서 제외해 주세요";
+
+    el.permLocation.hidden = !needLocation;
+    el.permBattery.hidden = !needBattery;
+
+    return needLocation || needBattery;
   }
 
   // ---------- 화면 꺼짐 방지 ----------

@@ -8,7 +8,7 @@
  *  - 앱 셸(HTML/CSS/JS): 네트워크 우선, 실패 시 캐시. 배포 직후 최신 코드를 받게 한다.
  *  - 지도 타일: 캐시하지 않는다(용량이 크고 변동이 많다).
  */
-var CACHE = "rtloc-shell-v17";
+var CACHE = "rtloc-shell-v18";
 
 var SHELL = [
   "./",

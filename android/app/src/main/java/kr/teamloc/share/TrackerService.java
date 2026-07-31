@@ -425,21 +425,21 @@ public class TrackerService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent contentIntent = PendingIntent.getActivity(this, 0, open, flags);
 
-        Intent stop = new Intent(this, TrackerService.class).setAction(ACTION_STOP);
-        PendingIntent stopIntent = PendingIntent.getService(this, 1, stop, flags);
-
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
+        // 알림에 "중지" 버튼을 두지 않는다.
+        //
+        // 예전에는 있었다. 그런데 그걸 눌러 추적이 꺼진 줄 모르고 임무를 계속하면 그
+        // 구간 경로가 통째로 빈다. 서비스가 위치를 아예 받지 않았으므로 나중에 메꿀
+        // 방법도 없다. 멈추는 길은 앱에서 "나가기" 하나로 둔다.
         return builder
                 .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)
                 .setContentIntent(contentIntent)
-                .addAction(new Notification.Action.Builder(null,
-                        getString(R.string.tracking_stop), stopIntent).build())
                 .build();
     }
 
@@ -497,7 +497,10 @@ public class TrackerService extends Service {
 
     @Override
     public void onDestroy() {
+        // 시스템이 서비스만 끊어 갔을 때도 상태를 정확히 내려 둔다.
+        // 이걸 빼먹으면 웹 화면이 아직 추적 중이라고 믿어서 다시 켜지 않는다.
         running = false;
+        locationRunning = false;
         super.onDestroy();
     }
 
